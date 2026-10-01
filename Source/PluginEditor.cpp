@@ -1,32 +1,89 @@
 #include "PluginEditor.h"
+#include "PluginVersion.h"
 
 using namespace rhytms;
 using namespace rhytms::ui;
 
 namespace
 {
-constexpr int editorWidth = 1100;
-constexpr int editorHeight = 744;
-
 struct OrbitKnobSpec { const char* id; const char* label; };
 constexpr OrbitKnobSpec orbitKnobs[] = {
     { "steps", "steps" }, { "pulses", "pulses" }, { "rotate", "rotate" }, { "rate", "rate" },
     { "pitch", "pitch" }, { "reach", "reach" },   { "length", "length" }, { "colour", "colour" },
     { "pan", "pan" },     { "level", "level" },   { "reverse", "reverse" },
 };
+
+constexpr int saveAsId = 1;
+constexpr int firstPresetId = 100;
 }
 
-RhytmsEditor::RhytmsEditor (RhytmsProcessor& p)
-    : AudioProcessorEditor (&p), proc (p), rings (p), weather (p), memoryView (p)
-{
-    setLookAndFeel (&look);
+// ===========================================================================
 
+RhytmsPanel::RhytmsPanel (RhytmsProcessor& p)
+    : proc (p), rings (p), weather (p), memoryView (p)
+{
     addAndMakeVisible (rings);
     addAndMakeVisible (weather);
     addAndMakeVisible (memoryView);
 
+    // ---- header ----
+    presetBox.setTextWhenNothingSelected ("Init");
+    presetBox.setTooltip ("Presets. Choose \"save as...\" to keep the current state as a user preset.");
+    presetBox.onChange = [this]
+    {
+        const int id = presetBox.getSelectedId();
+        if (id == saveAsId)
+        {
+            showSelectedPreset();
+            savePresetAs();
+            return;
+        }
+        const int index = id - firstPresetId;
+        if (juce::isPositiveAndBelow (index, (int) presetEntries.size()))
+        {
+            proc.loadPreset (presetEntries[(size_t) index]);
+            shownPresetName = proc.getCurrentPresetName();
+        }
+    };
+    addAndMakeVisible (presetBox);
+
+    prevButton.setTooltip ("Previous preset");
+    nextButton.setTooltip ("Next preset");
+    prevButton.onClick = [this] { stepPreset (-1); };
+    nextButton.onClick = [this] { stepPreset (1); };
+    addAndMakeVisible (prevButton);
+    addAndMakeVisible (nextButton);
+
+    randomButton.setTooltip ("Randomize every unlocked knob. Alt-click a knob to lock it (ochre dot), "
+                             "ctrl/cmd-drag a knob to limit its range (red arc). Mix and sense start locked.");
+    randomButton.onClick = [this] { proc.randomize(); };
+    randomButton.setColour (juce::TextButton::textColourOffId, colours::red);
+    addAndMakeVisible (randomButton);
+
+    categoryButton.setTooltip ("Steer randomize and morph towards a kind of rhythm");
+    categoryButton.setColour (juce::TextButton::textColourOffId, colours::red);
+    categoryButton.onClick = [this] { showCategoryMenu(); };
+    addAndMakeVisible (categoryButton);
+
+    morphButton.setColour (juce::ToggleButton::tickColourId, colours::red);
+    morphButton.setTooltip ("Let every unlocked knob drift continuously between random states over the morph time");
+    addAndMakeVisible (morphButton);
+    buttonAttachments.push_back (std::make_unique<ButtonAttachment> (proc.apvts, "morph", morphButton));
+    addKnob (morphTimeKnob, "morphTime", "time", colours::red);
+    morphTimeKnob->setLockable (false);
+
+    undoButton.setTooltip ("Step back through randomize, throw, morph and preset changes");
+    redoButton.setTooltip ("Step forward again");
+    undoButton.onClick = [this] { proc.undo(); };
+    redoButton.onClick = [this] { proc.redo(); };
+    addAndMakeVisible (undoButton);
+    addAndMakeVisible (redoButton);
+
+    // ---- i. listen ----
     syncButton.setColour (juce::ToggleButton::tickColourId, colours::red);
     holdButton.setColour (juce::ToggleButton::tickColourId, colours::red);
+    syncButton.setTooltip ("Follow the DAW's tempo, meter and bar position");
+    holdButton.setTooltip ("Freeze the memory: keep playing what was just caught");
     addAndMakeVisible (syncButton);
     addAndMakeVisible (holdButton);
     buttonAttachments.push_back (std::make_unique<ButtonAttachment> (proc.apvts, "sync", syncButton));
@@ -35,7 +92,9 @@ RhytmsEditor::RhytmsEditor (RhytmsProcessor& p)
     addKnob (senseKnob, "sense", "sense", colours::ochre);
     addKnob (memoryKnob, "memory", "memory", colours::ochre);
     addKnob (bpmKnob, "bpm", "free tempo", colours::ink);
+    bpmKnob->setLockable (false);
 
+    // ---- iii. bloom & space ----
     addKnob (bloomKnob, "bloom", "bloom", colours::red);
     addKnob (evolveKnob, "evolve", "evolve", colours::red);
     addKnob (mirrorKnob, "mirror", "mirror", colours::ochre);
@@ -45,7 +104,9 @@ RhytmsEditor::RhytmsEditor (RhytmsProcessor& p)
     addKnob (dryKnob, "dry", "dry", colours::ink);
     addKnob (wetKnob, "wet", "wet", colours::ink);
     addKnob (outKnob, "out", "out", colours::ink);
+    outKnob->setLockable (false);
 
+    // ---- iv. voices ----
     for (int o = 0; o < numOrbits; ++o)
     {
         auto& row = rows[(size_t) o];
@@ -63,78 +124,179 @@ RhytmsEditor::RhytmsEditor (RhytmsProcessor& p)
     }
 
     regrowButton.setTooltip ("Forget what the orbits have grown into and return to their skeletons");
-    throwButton.setTooltip ("Throw new shapes for all three orbits");
+    throwButton.setTooltip ("Throw new shapes (steps, pulses, rotation, rate) for all three orbits");
     clearButton.setTooltip ("Release every pinned step");
     regrowButton.onClick = [this] { proc.requestRegrow(); };
-    throwButton.onClick = [this] { throwDice(); };
+    throwButton.onClick = [this] { proc.throwShapes(); };
     clearButton.onClick = [this] { for (int o = 0; o < numOrbits; ++o) proc.clearPins (o); };
     addAndMakeVisible (regrowButton);
     addAndMakeVisible (throwButton);
     addAndMakeVisible (clearButton);
 
-    setSize (editorWidth, editorHeight);
+    populatePresets();
+    refreshLocks();
+    updateRandomizeText();
+
+    setSize (panelWidth, panelHeight);
     startTimerHz (30);
 }
 
-RhytmsEditor::~RhytmsEditor()
+RhytmsPanel::~RhytmsPanel()
 {
     stopTimer();
-    setLookAndFeel (nullptr);
 }
 
-void RhytmsEditor::addKnob (std::unique_ptr<Knob>& knob, const juce::String& id, const juce::String& label, juce::Colour accent)
+void RhytmsPanel::addKnob (std::unique_ptr<Knob>& knob, const juce::String& id, const juce::String& label, juce::Colour accent)
 {
     knob = std::make_unique<Knob> (label, accent);
     addAndMakeVisible (*knob);
     sliderAttachments.push_back (std::make_unique<SliderAttachment> (proc.apvts, id, knob->slider));
-    knob->slider.setDoubleClickReturnValue (true, (double) proc.apvts.getParameterRange (id).convertFrom0to1 (
-        proc.apvts.getParameter (id)->getDefaultValue()));
-}
+    auto* prm = proc.apvts.getParameter (id);
+    knob->slider.setDoubleClickReturnValue (true, (double) prm->convertFrom0to1 (prm->getDefaultValue()));
 
-void RhytmsEditor::throwDice()
-{
-    auto set = [this] (const juce::String& id, float value)
+    if (state::MorphEngine::isRandomizable (*prm))
     {
-        if (auto* prm = proc.apvts.getParameter (id))
+        lockableKnobs.emplace_back (id, knob.get());
+        knob->onLockEdited = [this, id] (const KnobLock& l)
         {
-            prm->beginChangeGesture();
-            prm->setValueNotifyingHost (prm->convertTo0to1 (value));
-            prm->endChangeGesture();
-        }
-    };
-
-    static constexpr int stepChoices[] = { 5, 7, 8, 9, 10, 11, 12, 13, 16, 16, 24 };
-    static constexpr float pitchChoices[] = { -12.0f, -7.0f, -5.0f, 0.0f, 0.0f, 0.0f, 5.0f, 7.0f, 12.0f };
-
-    for (int o = 0; o < numOrbits; ++o)
-    {
-        const int steps = stepChoices[dice.nextInt ((int) std::size (stepChoices))];
-        const int pulses = juce::jlimit (1, steps, 1 + dice.nextInt (juce::jmax (1, steps * 3 / 5)));
-        set (orbitId (o, "steps"), (float) steps);
-        set (orbitId (o, "pulses"), (float) pulses);
-        set (orbitId (o, "rotate"), (float) dice.nextInt (steps));
-        set (orbitId (o, "rate"), (float) dice.nextInt (RhytmsProcessor::rateNames().size()));
-        set (orbitId (o, "pitch"), pitchChoices[dice.nextInt ((int) std::size (pitchChoices))]);
-        set (orbitId (o, "reach"), dice.nextFloat());
-        set (orbitId (o, "length"), 0.05f + 0.8f * dice.nextFloat() * dice.nextFloat());
-        set (orbitId (o, "colour"), dice.nextFloat() * 1.6f - 0.8f);
-        set (orbitId (o, "pan"), dice.nextFloat() * 1.4f - 0.7f);
-        set (orbitId (o, "reverse"), dice.nextFloat() < 0.4f ? dice.nextFloat() * 0.6f : 0.0f);
+            proc.morphEngine.setMeta (id, { l.locked, l.custom, l.lo, l.hi });
+            seenMetaVersion = proc.morphEngine.getMetaVersion();
+        };
     }
-    proc.requestRegrow();
+    else
+    {
+        knob->setLockable (false);
+    }
 }
 
-void RhytmsEditor::timerCallback()
+void RhytmsPanel::refreshLocks()
+{
+    seenMetaVersion = proc.morphEngine.getMetaVersion();
+    for (auto& [id, knob] : lockableKnobs)
+    {
+        const auto m = proc.morphEngine.getMeta (id);
+        knob->setLock ({ m.locked, m.customRange, m.rmin, m.rmax });
+    }
+    updateRandomizeText();
+}
+
+// ---- presets ----
+
+void RhytmsPanel::populatePresets()
+{
+    presetEntries = proc.presetManager.getEntries();
+    presetBox.clear (juce::dontSendNotification);
+    presetBox.addItem ("save as...", saveAsId);
+    presetBox.addSeparator();
+
+    bool factoryHeading = false, userHeading = false;
+    for (size_t i = 0; i < presetEntries.size(); ++i)
+    {
+        const auto& e = presetEntries[i];
+        if (e.factory && ! factoryHeading) { presetBox.addSectionHeading ("factory"); factoryHeading = true; }
+        if (! e.factory && ! userHeading)  { presetBox.addSectionHeading ("user"); userHeading = true; }
+        presetBox.addItem (e.name, firstPresetId + (int) i);
+    }
+    showSelectedPreset();
+}
+
+void RhytmsPanel::showSelectedPreset()
+{
+    shownPresetName = proc.getCurrentPresetName();
+    const int index = proc.presetManager.indexOf (shownPresetName);
+    if (index >= 0 && index < (int) presetEntries.size())
+        presetBox.setSelectedId (firstPresetId + index, juce::dontSendNotification);
+    else
+    {
+        presetBox.setSelectedId (0, juce::dontSendNotification);
+        presetBox.setText (shownPresetName, juce::dontSendNotification);
+    }
+}
+
+void RhytmsPanel::stepPreset (int delta)
+{
+    if (presetEntries.empty())
+        return;
+    const int n = (int) presetEntries.size();
+    int index = proc.presetManager.indexOf (proc.getCurrentPresetName());
+    index = index < 0 ? (delta > 0 ? 0 : n - 1) : ((index + delta) % n + n) % n;
+    proc.loadPreset (presetEntries[(size_t) index]);
+    showSelectedPreset();
+}
+
+void RhytmsPanel::savePresetAs()
+{
+    const auto userDir = proc.presetManager.getUserDirectory();
+    chooser = std::make_shared<juce::FileChooser> ("save preset as...", userDir.getChildFile (proc.getCurrentPresetName() + ".xml"), "*.xml");
+    const auto chooserFlags = juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                     | juce::FileBrowserComponent::warnAboutOverwriting;
+
+    chooser->launchAsync (chooserFlags, [this, userDir, safe = juce::Component::SafePointer<RhytmsPanel> (this)] (const juce::FileChooser& fc)
+    {
+        if (safe == nullptr)
+            return;
+        auto target = fc.getResult();
+        if (target == juce::File {})
+            return;
+        if (target.isDirectory())
+            target = target.getChildFile ("preset.xml");
+        target = target.withFileExtension (".xml");
+        if (! target.isAChildOf (userDir))
+            target = userDir.getChildFile (target.getFileName());
+
+        proc.saveUserPreset (target);
+        populatePresets();
+    });
+}
+
+// ---- randomize category ----
+
+void RhytmsPanel::showCategoryMenu()
+{
+    const auto names = state::MorphEngine::categoryNames();
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("randomize towards");
+    for (int i = 0; i < names.size(); ++i)
+        menu.addItem (i + 1, names[i].toLowerCase(), true, i == proc.morphEngine.getCategory());
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&categoryButton),
+                        [safe = juce::Component::SafePointer<RhytmsPanel> (this)] (int result)
+                        {
+                            if (safe == nullptr || result <= 0)
+                                return;
+                            safe->proc.morphEngine.setCategory (result - 1);
+                            safe->updateRandomizeText();
+                        });
+}
+
+void RhytmsPanel::updateRandomizeText()
+{
+    const int c = proc.morphEngine.getCategory();
+    randomButton.setButtonText (c == 0 ? "randomize" : "randomize: " + state::MorphEngine::categoryNames()[c].toLowerCase());
+}
+
+// ---- live ----
+
+void RhytmsPanel::timerCallback()
 {
     const bool synced = proc.apvts.getRawParameterValue ("sync")->load() > 0.5f;
     bpmKnob->setAlpha (synced ? 0.35f : 1.0f);
+    undoButton.setEnabled (proc.canUndo());
+    redoButton.setEnabled (proc.canRedo());
+    undoButton.setAlpha (proc.canUndo() ? 1.0f : 0.35f);
+    redoButton.setAlpha (proc.canRedo() ? 1.0f : 0.35f);
+
+    if (proc.morphEngine.getMetaVersion() != seenMetaVersion)
+        refreshLocks();
+    if (proc.getCurrentPresetName() != shownPresetName)
+        showSelectedPreset();
+
     rings.repaint();
     memoryView.repaint();
     weather.repaint();
-    repaint (0, 0, getWidth(), 60);
 }
 
-void RhytmsEditor::paint (juce::Graphics& g)
+void RhytmsPanel::paint (juce::Graphics& g)
 {
     g.fillAll (colours::paper);
 
@@ -148,23 +310,21 @@ void RhytmsEditor::paint (juce::Graphics& g)
 
     g.setColour (colours::ink);
     g.setFont (serif (34.0f, true));
-    g.drawText ("rhytms", 24, 8, 160, 44, juce::Justification::left);
+    g.drawText ("rhytms", 24, 8, 130, 44, juce::Justification::left);
     g.setColour (colours::ink.withAlpha (0.6f));
     g.setFont (serif (13.0f, true));
-    g.drawText ("a rhythmic sostenuto  /  it listens, remembers, and plays your sound back as rhythm",
-                150, 22, 560, 22, juce::Justification::left);
-
-    const bool synced = proc.apvts.getRawParameterValue ("sync")->load() > 0.5f;
-    g.setFont (mono (11.0f));
-    g.setColour (synced ? colours::red : colours::ink.withAlpha (0.6f));
-    g.drawText (juce::String (proc.visual.bpm.load(), 1) + (synced ? " bpm  daw" : " bpm  free"),
-                getWidth() - 150, 20, 126, 22, juce::Justification::right);
+    g.drawText ("a rhythmic sostenuto", 140, 14, 220, 18, juce::Justification::left);
+    g.setColour (colours::ink.withAlpha (0.4f));
+    g.setFont (mono (10.0f));
+    g.drawText ("v" RHYTMS_VERSION_STRING, 140, 32, 120, 14, juce::Justification::left);
 
     g.setColour (colours::faint);
     g.drawHorizontalLine (58, 24.0f, (float) getWidth() - 24.0f);
     g.drawHorizontalLine (522, 24.0f, (float) getWidth() - 24.0f);
     g.drawVerticalLine (348, 70.0f, 510.0f);
     g.drawVerticalLine (770, 70.0f, 510.0f);
+    g.drawVerticalLine (530, 16.0f, 44.0f);
+    g.drawVerticalLine (826, 16.0f, 44.0f);
 
     auto caption = [&] (const juce::String& text, int x, int y)
     {
@@ -179,17 +339,29 @@ void RhytmsEditor::paint (juce::Graphics& g)
 
     g.setColour (colours::ink.withAlpha (0.45f));
     g.setFont (serif (11.5f, true));
-    g.drawFittedText ("click a step to pin it: always, then never, then free.\nscroll on a circle to turn it.",
-                      790, 450, 290, 34, juce::Justification::topLeft, 2);
+    g.drawFittedText ("click a step to pin it: always, then never, then free.\n"
+                      "scroll on a circle to turn it.\n"
+                      "alt-click a knob to lock it, ctrl/cmd-drag to set its randomize range.",
+                      790, 440, 290, 50, juce::Justification::topLeft, 3);
 }
 
-void RhytmsEditor::resized()
+void RhytmsPanel::resized()
 {
-    syncButton.setBounds (getWidth() - 290, 18, 130, 26);
+    // header
+    undoButton.setBounds (420, 16, 48, 26);
+    redoButton.setBounds (472, 16, 48, 26);
+    morphButton.setBounds (540, 17, 74, 24);
+    morphTimeKnob->setBounds (612, 4, 46, 52);
+    randomButton.setBounds (668, 16, 128, 26);
+    categoryButton.setBounds (798, 16, 22, 26);
+    prevButton.setBounds (836, 16, 24, 26);
+    presetBox.setBounds (862, 16, 188, 26);
+    nextButton.setBounds (1052, 16, 24, 26);
 
     // i. listen
     memoryView.setBounds (24, 86, 310, 82);
-    holdButton.setBounds (24, 176, 200, 24);
+    holdButton.setBounds (24, 176, 160, 24);
+    syncButton.setBounds (192, 176, 142, 24);
     senseKnob->setBounds (24, 206, 80, 74);
     memoryKnob->setBounds (110, 206, 80, 74);
     bpmKnob->setBounds (196, 206, 80, 74);
@@ -203,14 +375,14 @@ void RhytmsEditor::resized()
     clearButton.setBounds (bx + 172, 486, 80, 24);
 
     // iii. bloom & space
-    rhytms::ui::Knob* grid[3][3] = {
+    Knob* grid[3][3] = {
         { bloomKnob.get(), evolveKnob.get(), mirrorKnob.get() },
         { swingKnob.get(), haloKnob.get(), dustKnob.get() },
         { dryKnob.get(), wetKnob.get(), outKnob.get() },
     };
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
-            grid[r][c]->setBounds (790 + c * 98, 88 + r * 118, 92, 92);
+            grid[r][c]->setBounds (790 + c * 98, 84 + r * 116, 92, 92);
 
     // iv. voices
     for (int o = 0; o < numOrbits; ++o)
@@ -221,4 +393,35 @@ void RhytmsEditor::resized()
         for (size_t k = 0; k < row.knobs.size(); ++k)
             row.knobs[k]->setBounds (100 + (int) k * 88, y, 70, 62);
     }
+}
+
+// ===========================================================================
+
+RhytmsEditor::RhytmsEditor (RhytmsProcessor& p)
+    : AudioProcessorEditor (&p), proc (p), panel (p)
+{
+    setLookAndFeel (&look);
+    addAndMakeVisible (panel);
+
+    // read before the limits below trigger a resize that would overwrite it
+    const float scale = juce::jlimit (0.6f, 1.6f, proc.getUiScale());
+    const double aspect = (double) RhytmsPanel::panelWidth / RhytmsPanel::panelHeight;
+    setResizable (true, true);
+    setResizeLimits (660, (int) (660 / aspect), 1760, (int) (1760 / aspect));
+    if (auto* c = getConstrainer())
+        c->setFixedAspectRatio (aspect);
+
+    setSize (juce::roundToInt (RhytmsPanel::panelWidth * scale), juce::roundToInt (RhytmsPanel::panelHeight * scale));
+}
+
+RhytmsEditor::~RhytmsEditor()
+{
+    setLookAndFeel (nullptr);
+}
+
+void RhytmsEditor::resized()
+{
+    const float scale = (float) getWidth() / (float) RhytmsPanel::panelWidth;
+    panel.setTransform (juce::AffineTransform::scale (scale));
+    proc.setUiScale (scale);
 }

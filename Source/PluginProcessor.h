@@ -8,6 +8,8 @@
 #include "dsp/Halo.h"
 #include "dsp/Orbit.h"
 #include "dsp/Voice.h"
+#include "state/MorphEngine.h"
+#include "state/PresetManager.h"
 
 namespace rhytms
 {
@@ -43,11 +45,13 @@ struct VisualState
 };
 } // namespace rhytms
 
-class RhytmsProcessor : public juce::AudioProcessor
+class RhytmsProcessor : public juce::AudioProcessor,
+                        private juce::AudioProcessorValueTreeState::Listener,
+                        private juce::AsyncUpdater
 {
 public:
     RhytmsProcessor();
-    ~RhytmsProcessor() override = default;
+    ~RhytmsProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -84,8 +88,32 @@ public:
 
     void requestRegrow() { regrowRequested.store (true); }
 
+    // ---- state, presets, randomize, history (message thread) ----
+    juce::ValueTree captureState();
+    // keepPerformance leaves sync, hold, morph and output level untouched
+    // (used for presets and undo, not for restoring a session).
+    void applyState (const juce::ValueTree& state, bool keepPerformance);
+
+    void loadPreset (const rhytms::state::PresetManager::Entry& entry);
+    bool saveUserPreset (const juce::File& file);
+    juce::String getCurrentPresetName() const;
+    std::vector<std::pair<juce::String, juce::ValueTree>> makeFactoryPresets();
+
+    void randomize();
+    void throwShapes();
+    void pushHistory();
+    void undo();
+    void redo();
+    bool canUndo() const { return ! undoStack.empty(); }
+    bool canRedo() const { return ! redoStack.empty(); }
+
+    float getUiScale() const { return uiScale; }
+    void setUiScale (float s) { uiScale = s; }
+
     juce::AudioProcessorValueTreeState apvts;
     rhytms::VisualState visual;
+    rhytms::state::PresetManager presetManager;
+    rhytms::state::MorphEngine morphEngine;
 
 private:
     struct OrbitParams
@@ -120,6 +148,10 @@ private:
         int step = 0;
         float velocity = 1.0f;
     };
+
+    void parameterChanged (const juce::String& id, float value) override;
+    void handleAsyncUpdate() override;
+    void setCurrentPresetName (const juce::String& name);
 
     void scheduleOrbit (int o, double ppqStart, double ppqEnd, double beatsPerSample, double barBeats);
     void strike (int orbit, int step, float velocity);
@@ -167,6 +199,12 @@ private:
     int64_t sampleCounter = 0;
     uint32_t voiceSeed = 1;
     juce::SmoothedValue<float> dryGain, wetGain, outGain;
+
+    std::vector<juce::ValueTree> undoStack, redoStack;
+    juce::String currentPresetName { "Init" };
+    juce::CriticalSection presetNameLock;
+    float uiScale = 1.0f;
+    juce::Random throwDice;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RhytmsProcessor)
 };

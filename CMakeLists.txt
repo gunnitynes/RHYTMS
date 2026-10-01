@@ -53,6 +53,8 @@ juce_add_plugin(RHYTMS
 target_sources(RHYTMS PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
+    Source/state/MorphEngine.cpp
+    Source/state/PresetManager.cpp
 )
 
 target_include_directories(RHYTMS PRIVATE Source)

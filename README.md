@@ -72,6 +72,30 @@ to the right gives a dense, rolling storm made of your own sound.
 * **regrow** forgets what the orbits have grown into. **throw** rolls new shapes for
   all three. **unpin** clears every pin.
 
+## Presets, randomize, morph, undo
+
+The header carries the same toolkit as the other plugins:
+
+* **Presets:** a dropdown with *save as...* first, then **factory** and **user**
+  sections, plus ‹ › to step through them. A preset is the whole state: every knob,
+  the pinned steps and the knob locks. Loading a preset never changes sync, hold,
+  morph or the output level. Ten factory presets come with the plugin:
+  *Init, Tapped Gamelan, Ghost Choir, Stutter Poem, Polymeter Clock, Rain on Tin,
+  Slow Bells, Broken Machine, Mirror Mirror, Dust Waltz*.
+  Files live in `~/Library/Application Support/gunnitynes/RHYTMS/Presets` on macOS
+  and `%APPDATA%\gunnitynes\RHYTMS\Presets` on Windows.
+* **randomize** rolls every unlocked knob. The **▾** next to it steers the roll
+  towards a kind of rhythm: *pulse, bloom, storm, sparse, mirror* (or *any*).
+* **Knob locks:** alt-click a knob to lock it (ochre dot). Ctrl/cmd-drag a knob to
+  limit where randomize may put it (red arc). Ctrl/cmd-click clears the range, and
+  right-click opens a menu. Dry, wet and sense start locked, and orbit pitch starts
+  limited to an octave either way.
+* **morph** lets every unlocked knob drift continuously between random states over
+  **time** (0.5–60 s). Locked knobs stay put, so you can lock the parts you love and
+  let the rest wander.
+* **undo / redo** step through randomize, throw, morph and preset changes.
+* The window is **resizable** (drag the corner) and remembers its size.
+
 ## Sync
 
 * **sync to daw** (default): tempo, time signature and bar position follow the host.
@@ -163,6 +187,8 @@ Source/
   dsp/Orbit.h         euclidean skeleton + cellular-automaton growth
   dsp/Voice.h         slice playback, freeze grains (bloom), filter
   dsp/Halo.h          dust (wow + saturation) and halo (diffuse echo)
+  state/PresetManager factory / user preset files
+  state/MorphEngine   randomize, morph, knob locks and ranges, categories
   ui/Look.h           paper & ink look, dials
   ui/Views.h          orbit rings, weather pad, memory strip
 ```

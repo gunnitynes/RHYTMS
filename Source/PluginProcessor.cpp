@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "PluginVersion.h"
 
 using namespace rhytms;
 
@@ -83,6 +84,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout RhytmsProcessor::createLayou
     layout.add (unit ("dry", "Dry", 0.5f));
     layout.add (unit ("wet", "Wet", 0.8f));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "out", 1 }, "Output", NormalisableRange<float> (-30.0f, 6.0f, 0.1f), 0.0f));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "morph", 1 }, "Morph", false));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "morphTime", 1 }, "Morph Time",
+                                                       NormalisableRange<float> (0.5f, 60.0f, 0.1f, 0.4f), 8.0f,
+                                                       AudioParameterFloatAttributes().withLabel ("s")));
 
     for (int o = 0; o < numOrbits; ++o)
     {
@@ -109,7 +114,8 @@ RhytmsProcessor::RhytmsProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "RHYTMS", createLayout())
+      apvts (*this, nullptr, "RHYTMS", createLayout()),
+      morphEngine (apvts)
 {
     auto get = [this] (const juce::String& id) { return apvts.getRawParameterValue (id); };
     pSync = get ("sync");     pBpm = get ("bpm");       pHold = get ("hold");
@@ -131,6 +137,29 @@ RhytmsProcessor::RhytmsProcessor()
     }
 
     for (auto& v : visual.voiceAges) v.store (-1.0f);
+
+    apvts.addParameterListener ("morph", this);
+    presetManager.seedFactory (makeFactoryPresets());
+}
+
+RhytmsProcessor::~RhytmsProcessor()
+{
+    apvts.removeParameterListener ("morph", this);
+    cancelPendingUpdate();
+}
+
+void RhytmsProcessor::parameterChanged (const juce::String&, float)
+{
+    // may arrive on the audio thread; the morph timer lives on the message thread
+    triggerAsyncUpdate();
+}
+
+void RhytmsProcessor::handleAsyncUpdate()
+{
+    const bool on = param (apvts.getRawParameterValue ("morph")) > 0.5f;
+    if (on && ! morphEngine.isMorphing())
+        pushHistory();
+    morphEngine.setMorphEnabled (on);
 }
 
 bool RhytmsProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -477,9 +506,96 @@ void RhytmsProcessor::publishVisuals (double ppqEnd)
     visual.hostSynced.store (param (pSync) > 0.5f, std::memory_order_relaxed);
 }
 
-void RhytmsProcessor::getStateInformation (juce::MemoryBlock& destData)
+// ---------------------------------------------------------------------------
+// state, presets, randomize, history
+
+namespace
+{
+// Loading a preset or stepping through history never changes these: they
+// belong to the performance, not to the sound.
+const juce::StringArray performanceIds { "sync", "hold", "morph", "morphTime", "out" };
+
+struct Setting { const char* id; float value; };
+struct FactoryPreset { const char* name; std::vector<Setting> settings; };
+
+const std::vector<FactoryPreset>& factoryPresets()
+{
+    static const std::vector<FactoryPreset> presets = {
+        { "Init", {} },
+
+        { "Tapped Gamelan",
+          { { "bloom", 0.6f }, { "order", 0.15f }, { "halo", 0.4f }, { "o2_pitch", 12.0f },
+            { "o3_pitch", 19.0f }, { "o1_colour", 0.2f }, { "o3_reverse", 0.0f }, { "o2_length", 0.45f } } },
+
+        { "Ghost Choir",
+          { { "bloom", 0.92f }, { "order", 0.3f }, { "density", 0.35f }, { "halo", 0.55f }, { "dry", 0.0f },
+            { "o1_length", 0.9f }, { "o2_length", 1.0f }, { "o3_length", 0.8f },
+            { "o1_colour", -0.5f }, { "o2_colour", -0.7f }, { "o3_colour", -0.3f } } },
+
+        { "Stutter Poem",
+          { { "bloom", 0.0f }, { "order", 0.8f }, { "density", 0.8f }, { "memory", 16.0f },
+            { "o1_reach", 1.0f }, { "o2_reach", 0.8f }, { "o3_reach", 1.0f },
+            { "o1_reverse", 0.4f }, { "o2_reverse", 0.4f }, { "o3_reverse", 0.5f } } },
+
+        { "Polymeter Clock",
+          { { "order", 0.0f }, { "density", 0.5f }, { "evolve", 0.0f }, { "bloom", 0.1f }, { "mirror", 0.0f },
+            { "o1_steps", 16.0f }, { "o1_rate", 4.0f }, { "o2_steps", 12.0f }, { "o2_rate", 2.0f },
+            { "o3_steps", 7.0f }, { "o3_rate", 6.0f } } },
+
+        { "Rain on Tin",
+          { { "density", 0.9f }, { "order", 0.55f }, { "bloom", 0.15f }, { "halo", 0.35f }, { "dust", 0.3f },
+            { "o1_rate", 7.0f }, { "o1_steps", 24.0f }, { "o1_pulses", 9.0f }, { "o1_level", 0.55f },
+            { "o1_colour", 0.6f }, { "o2_colour", 0.7f }, { "o3_colour", 0.4f } } },
+
+        { "Slow Bells",
+          { { "density", 0.2f }, { "order", 0.1f }, { "bloom", 0.75f }, { "halo", 0.6f },
+            { "o1_rate", 0.0f }, { "o2_rate", 3.0f }, { "o3_rate", 1.0f },
+            { "o1_pitch", 12.0f }, { "o2_pitch", 7.0f }, { "o3_pitch", 24.0f },
+            { "o1_length", 0.7f }, { "o2_length", 0.7f }, { "o3_length", 0.7f } } },
+
+        { "Broken Machine",
+          { { "order", 0.95f }, { "density", 0.7f }, { "evolve", 0.9f }, { "dust", 0.7f }, { "bloom", 0.2f },
+            { "swing", 0.3f }, { "o1_reverse", 0.3f } } },
+
+        { "Mirror Mirror",
+          { { "mirror", 1.0f }, { "order", 0.05f }, { "evolve", 0.05f }, { "bloom", 0.2f },
+            { "o1_reach", 0.0f }, { "o2_reach", 0.2f }, { "o3_reach", 0.4f } } },
+
+        { "Dust Waltz",
+          { { "swing", 0.55f }, { "dust", 0.5f }, { "halo", 0.45f }, { "bloom", 0.35f },
+            { "o1_steps", 12.0f }, { "o1_pulses", 4.0f }, { "o1_rate", 1.0f },
+            { "o2_steps", 9.0f }, { "o2_pulses", 3.0f }, { "o2_rate", 1.0f }, { "o2_pitch", -12.0f } } },
+    };
+    return presets;
+}
+} // namespace
+
+std::vector<std::pair<juce::String, juce::ValueTree>> RhytmsProcessor::makeFactoryPresets()
+{
+    std::vector<std::pair<juce::String, juce::ValueTree>> out;
+    const auto base = captureState();
+
+    for (const auto& preset : factoryPresets())
+    {
+        auto tree = base.createCopy();
+        for (const auto& s : preset.settings)
+        {
+            auto child = tree.getChildWithProperty ("id", juce::String (s.id));
+            jassert (child.isValid());
+            child.setProperty ("value", s.value, nullptr);
+        }
+        tree.setProperty ("presetName", preset.name, nullptr);
+        out.emplace_back (preset.name, tree);
+    }
+    return out;
+}
+
+juce::ValueTree RhytmsProcessor::captureState()
 {
     auto state = apvts.copyState();
+    for (auto* name : { "PINS", "UILOCKS" })
+        state.removeChild (state.getChildWithName (name), nullptr);
+
     juce::ValueTree pinTree ("PINS");
     for (int o = 0; o < numOrbits; ++o)
     {
@@ -487,28 +603,158 @@ void RhytmsProcessor::getStateInformation (juce::MemoryBlock& destData)
         for (auto& p : pins[(size_t) o]) s << p.load();
         pinTree.setProperty ("o" + juce::String (o), s, nullptr);
     }
-    state.removeChild (state.getChildWithName ("PINS"), nullptr);
     state.appendChild (pinTree, nullptr);
-
-    if (auto xml = state.createXml())
-        copyXmlToBinary (*xml, destData);
+    state.appendChild (morphEngine.toTree(), nullptr);
+    state.setProperty ("presetName", getCurrentPresetName(), nullptr);
+    state.setProperty ("uiScale", uiScale, nullptr);
+    state.setProperty ("version", RHYTMS_VERSION_STRING, nullptr);
+    return state;
 }
 
-void RhytmsProcessor::setStateInformation (const void* data, int sizeInBytes)
+void RhytmsProcessor::applyState (const juce::ValueTree& source, bool keepPerformance)
 {
-    auto xml = getXmlFromBinary (data, sizeInBytes);
-    if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
+    if (! source.isValid() || ! source.hasType (apvts.state.getType()))
         return;
 
-    auto state = juce::ValueTree::fromXml (*xml);
-    auto pinTree = state.getChildWithName ("PINS");
+    auto state = source.createCopy();
+
+    if (keepPerformance)
+        for (const auto& id : performanceIds)
+        {
+            auto child = state.getChildWithProperty ("id", id);
+            if (child.isValid())
+                child.setProperty ("value", apvts.getRawParameterValue (id)->load(), nullptr);
+        }
+
+    const auto pinTree = state.getChildWithName ("PINS");
     for (int o = 0; o < numOrbits; ++o)
     {
         const auto s = pinTree.getProperty ("o" + juce::String (o)).toString();
         for (int i = 0; i < Orbit::maxSteps; ++i)
             pins[(size_t) o][(size_t) i].store (i < s.length() ? juce::jlimit (0, 2, (int) (s[i] - '0')) : 0);
     }
+
+    morphEngine.fromTree (state.getChildWithName ("UILOCKS"));
+    setCurrentPresetName (state.getProperty ("presetName", "Init").toString());
+    if (! keepPerformance)
+        uiScale = juce::jlimit (0.6f, 1.6f, (float) state.getProperty ("uiScale", 1.0f));
+
+    for (auto* name : { "PINS", "UILOCKS" })
+        state.removeChild (state.getChildWithName (name), nullptr);
+    for (auto* prop : { "presetName", "uiScale", "version" })
+        state.removeProperty (prop, nullptr);
+
     apvts.replaceState (state);
+    requestRegrow();
+    morphEngine.restartFromCurrent();
+}
+
+void RhytmsProcessor::setCurrentPresetName (const juce::String& name)
+{
+    const juce::ScopedLock sl (presetNameLock);
+    currentPresetName = name;
+}
+
+juce::String RhytmsProcessor::getCurrentPresetName() const
+{
+    const juce::ScopedLock sl (presetNameLock);
+    return currentPresetName;
+}
+
+void RhytmsProcessor::loadPreset (const rhytms::state::PresetManager::Entry& entry)
+{
+    const auto tree = presetManager.load (entry.file, apvts.state.getType());
+    if (! tree.isValid())
+        return;
+    pushHistory();
+    applyState (tree, true);
+    setCurrentPresetName (entry.name);
+}
+
+bool RhytmsProcessor::saveUserPreset (const juce::File& file)
+{
+    const auto name = file.getFileNameWithoutExtension();
+    const auto previous = getCurrentPresetName();
+    setCurrentPresetName (name);
+    if (presetManager.save (captureState(), file))
+        return true;
+    setCurrentPresetName (previous);
+    return false;
+}
+
+void RhytmsProcessor::randomize()
+{
+    pushHistory();
+    morphEngine.randomizeAll();
+    requestRegrow();
+}
+
+void RhytmsProcessor::throwShapes()
+{
+    pushHistory();
+
+    auto set = [this] (const juce::String& id, float value)
+    {
+        if (auto* prm = apvts.getParameter (id))
+        {
+            if (morphEngine.getMeta (id).locked)
+                return;
+            prm->beginChangeGesture();
+            prm->setValueNotifyingHost (prm->convertTo0to1 (value));
+            prm->endChangeGesture();
+        }
+    };
+
+    static constexpr int stepChoices[] = { 5, 7, 8, 9, 10, 11, 12, 13, 16, 16, 24 };
+    for (int o = 0; o < numOrbits; ++o)
+    {
+        const int steps = stepChoices[throwDice.nextInt ((int) std::size (stepChoices))];
+        set (orbitId (o, "steps"), (float) steps);
+        set (orbitId (o, "pulses"), (float) juce::jlimit (1, steps, 1 + throwDice.nextInt (juce::jmax (1, steps * 3 / 5))));
+        set (orbitId (o, "rotate"), (float) throwDice.nextInt (steps));
+        set (orbitId (o, "rate"), (float) throwDice.nextInt (rateNames().size()));
+    }
+    requestRegrow();
+}
+
+void RhytmsProcessor::pushHistory()
+{
+    undoStack.push_back (captureState());
+    if (undoStack.size() > 64)
+        undoStack.erase (undoStack.begin());
+    redoStack.clear();
+}
+
+void RhytmsProcessor::undo()
+{
+    if (undoStack.empty())
+        return;
+    redoStack.push_back (captureState());
+    const auto state = undoStack.back();
+    undoStack.pop_back();
+    applyState (state, true);
+}
+
+void RhytmsProcessor::redo()
+{
+    if (redoStack.empty())
+        return;
+    undoStack.push_back (captureState());
+    const auto state = redoStack.back();
+    redoStack.pop_back();
+    applyState (state, true);
+}
+
+void RhytmsProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    if (auto xml = captureState().createXml())
+        copyXmlToBinary (*xml, destData);
+}
+
+void RhytmsProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    if (auto xml = getXmlFromBinary (data, sizeInBytes))
+        applyState (juce::ValueTree::fromXml (*xml), false);
 }
 
 juce::AudioProcessorEditor* RhytmsProcessor::createEditor()
