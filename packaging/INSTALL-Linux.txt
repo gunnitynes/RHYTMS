@@ -1,0 +1,4 @@
+RHYTMS - installing on Linux
+
+Copy RHYTMS.vst3 to ~/.vst3/ and rescan plugins in your host.
+RHYTMS is the standalone version.

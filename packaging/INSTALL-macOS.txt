@@ -1,0 +1,23 @@
+RHYTMS - installing on macOS
+
+1. Quit Ableton Live (or your DAW).
+
+2. Copy the plugins:
+   RHYTMS.vst3       ->  ~/Library/Audio/Plug-Ins/VST3/
+   RHYTMS.component  ->  ~/Library/Audio/Plug-Ins/Components/   (Audio Unit, optional)
+   RHYTMS.app        ->  /Applications/                          (standalone, optional)
+
+   (~ is your home folder. In Finder: Go > Go to Folder... and paste the path.)
+
+3. macOS quarantines downloaded plugins and hosts then silently skip them.
+   Open Terminal and run:
+
+   xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/RHYTMS.vst3
+   xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/RHYTMS.component
+
+4. Ableton Live: Settings > Plug-Ins
+   - turn on "Use VST3 Plug-in System Folders" (and "Use Audio Units v2" for the AU)
+   - press Rescan (hold Option while clicking Rescan for a full rescan)
+
+5. In the browser look under Plug-Ins > VST3 > gunnitynes > RHYTMS.
+   It is an audio effect: drop it on an audio track.

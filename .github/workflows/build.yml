@@ -22,6 +22,11 @@ jobs:
             cmake_args: ""
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      OUT: build/RHYTMS_artefacts/Release
     steps:
       - uses: actions/checkout@v4
 
@@ -39,12 +44,48 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 4
 
+      # Unsigned bundles are refused by macOS hosts; an ad-hoc signature is
+      # enough for a plugin you install yourself.
+      - name: Sign (ad-hoc)
+        if: runner.os == 'macOS'
+        run: |
+          for b in "$OUT/VST3/RHYTMS.vst3" "$OUT/AU/RHYTMS.component" "$OUT/Standalone/RHYTMS.app"; do
+            codesign --force --deep --sign - "$b"
+            codesign --verify --verbose "$b"
+          done
+
+      - name: Validate with pluginval
+        run: |
+          case "${{ runner.os }}" in
+            macOS)   PV=pluginval_macOS.zip;   EXE=pluginval.app/Contents/MacOS/pluginval ;;
+            Windows) PV=pluginval_Windows.zip; EXE=./pluginval.exe ;;
+            Linux)   PV=pluginval_Linux.zip;   EXE=./pluginval ;;
+          esac
+          curl -sSL -o pv.zip "https://github.com/Tracktion/pluginval/releases/latest/download/$PV"
+          unzip -q -o pv.zip
+          "$EXE" --strictness-level 5 --skip-gui-tests --validate "$OUT/VST3/RHYTMS.vst3"
+
+      # Zip with tools that keep executable bits and bundle structure intact;
+      # the artifact upload alone strips them and the plugin will not load.
+      - name: Package
+        run: |
+          PKG="RHYTMS-${{ matrix.name }}"
+          mkdir -p "dist/$PKG"
+          cp -R "$OUT/VST3/RHYTMS.vst3" "dist/$PKG/"
+          if [ -d "$OUT/AU/RHYTMS.component" ]; then cp -R "$OUT/AU/RHYTMS.component" "dist/$PKG/"; fi
+          cp -R "$OUT/Standalone/"* "dist/$PKG/"
+          cp packaging/INSTALL-${{ matrix.name }}.txt "dist/$PKG/INSTALL.txt"
+          cd dist
+          case "${{ runner.os }}" in
+            macOS)   ditto -c -k --sequesterRsrc --keepParent "$PKG" "$PKG.zip" ;;
+            Windows) 7z a -tzip "$PKG.zip" "$PKG" > /dev/null ;;
+            Linux)   tar -czf "$PKG.tar.gz" "$PKG" ;;
+          esac
+          rm -rf "$PKG"
+          ls -la
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: RHYTMS-${{ matrix.name }}
-          path: |
-            build/RHYTMS_artefacts/Release/VST3
-            build/RHYTMS_artefacts/Release/AU
-            build/RHYTMS_artefacts/Release/Standalone
-          if-no-files-found: ignore
+          path: dist/*

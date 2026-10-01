@@ -1,0 +1,18 @@
+RHYTMS - installing on Windows
+
+1. Quit Ableton Live (or your DAW).
+
+2. Copy the whole RHYTMS.vst3 folder into
+   C:\Program Files\Common Files\VST3\
+   so you end up with C:\Program Files\Common Files\VST3\RHYTMS.vst3\Contents\...
+   (RHYTMS.exe is the standalone version and can live anywhere.)
+
+3. If Windows marked the download as blocked: right-click the downloaded zip,
+   Properties, tick "Unblock", OK - then extract again.
+
+4. Ableton Live: Options > Preferences > Plug-Ins
+   - turn on "Use VST3 Plug-in System Folders"
+   - press Rescan (hold Alt while clicking Rescan for a full rescan)
+
+5. In the browser look under Plug-Ins > VST3 > gunnitynes > RHYTMS.
+   It is an audio effect: drop it on an audio track.

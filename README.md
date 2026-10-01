@@ -118,6 +118,18 @@ play), `free tempo`, `hold`.
 * **Polymeter clock:** steps 16 / 12 / 7, rates 1/16, 1/8T, 1/16Q, evolve 0, weather
   pad at the bottom.
 
+## Installing a downloaded build
+
+Each GitHub Actions run produces one zip per platform, with an `INSTALL.txt` inside.
+The zip is wrapped in the artifact's own zip, so unzip twice.
+
+* **macOS:** copy `RHYTMS.vst3` to `~/Library/Audio/Plug-Ins/VST3`, then clear the
+  download quarantine, or Live will silently skip the plugin:
+  `xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/RHYTMS.vst3`
+* **Windows:** copy the whole `RHYTMS.vst3` folder to `C:\Program Files\Common Files\VST3`.
+* **Ableton Live:** in Settings › Plug-Ins, turn on *Use VST3 Plug-in System Folders*
+  and click Rescan. RHYTMS appears under Plug-Ins › VST3 › **gunnitynes**.
+
 ## Building
 
 You need CMake 3.22+ and a C++20 compiler. JUCE 8.0.4 is fetched automatically.
