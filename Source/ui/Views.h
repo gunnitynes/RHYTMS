@@ -39,6 +39,21 @@ public:
         g.drawText ("mirror", juce::Rectangle<float> (c.x + R * 0.72f, c.y - R - 18.0f, 80.0f, 14.0f), juce::Justification::left);
 
         const double now = juce::Time::getMillisecondCounterHiRes();
+        const float dissolve = proc.visual.dissolve.load();
+
+        // while dissolving, every dot drifts away from its circle
+        auto place = [&] (int o, int i, float r, float frac)
+        {
+            auto pt = c.getPointOnCircumference (r, angleFor (frac));
+            if (dissolve > 0.001f)
+            {
+                const auto h = (uint32_t) (o * 131 + i * 977 + 17) * 2654435761u;
+                const float a = (float) (h & 0xffff) / 65535.0f * juce::MathConstants<float>::twoPi;
+                const float dist = dissolve * (8.0f + 30.0f * (float) ((h >> 16) & 0xff) / 255.0f);
+                pt += juce::Point<float> (std::cos (a), std::sin (a)) * dist;
+            }
+            return pt;
+        };
 
         for (int o = 0; o < numOrbits; ++o)
         {
@@ -47,7 +62,7 @@ public:
             const uint32_t pattern = view.pattern.load();
             const bool on = proc.apvts.getRawParameterValue (orbitId (o, "on"))->load() > 0.5f;
             const float r = radiusFor (o);
-            const auto col = colours::orbit (o).withMultipliedAlpha (on ? 1.0f : 0.25f);
+            const auto col = colours::orbit (o).withMultipliedAlpha ((on ? 1.0f : 0.25f) * (1.0f - 0.55f * dissolve));
 
             const int hits = view.hits.load();
             if (hits != lastHits[o]) { lastHits[o] = hits; flashTime[o] = now; flashStep[o] = view.lastHitStep.load(); }
@@ -62,7 +77,7 @@ public:
             for (int i = 0; i < steps; ++i)
                 if ((pattern >> i) & 1u)
                 {
-                    const auto pt = c.getPointOnCircumference (r, angleFor ((float) i / steps));
+                    const auto pt = place (o, i, r, (float) i / steps);
                     if (first) figure.startNewSubPath (pt), first = false;
                     else figure.lineTo (pt);
                 }
@@ -83,7 +98,7 @@ public:
 
             for (int i = 0; i < steps; ++i)
             {
-                const auto pt = c.getPointOnCircumference (r, angleFor ((float) i / steps));
+                const auto pt = place (o, i, r, (float) i / steps);
                 const bool active = ((pattern >> i) & 1u) != 0;
                 const int pin = proc.getPin (o, i);
                 const float f = (i == flashStep[o]) ? flash : 0.0f;
@@ -129,9 +144,9 @@ public:
 
         // the still centre
         const bool held = proc.apvts.getRawParameterValue ("hold")->load() > 0.5f;
-        g.setColour (held ? colours::red : colours::ink.withAlpha (0.55f));
+        g.setColour (held || dissolve > 0.01f ? colours::red : colours::ink.withAlpha (0.55f));
         g.setFont (serif (12.0f, true));
-        g.drawText (held ? "held" : juce::String (proc.visual.bpm.load(), 1),
+        g.drawText (dissolve > 0.01f ? "dissolving" : held ? "held" : juce::String (proc.visual.bpm.load(), 1),
                     juce::Rectangle<float> (c.x - 40.0f, c.y - 8.0f, 80.0f, 16.0f), juce::Justification::centred);
     }
 
@@ -348,6 +363,153 @@ public:
 private:
     int memory() const { return (int) proc.apvts.getRawParameterValue ("memory")->load(); }
     RhytmsProcessor& proc;
+};
+
+// ---------------------------------------------------------------------------
+// Dissolve: click to let the rhythm come apart into a held cloud over the
+// dissolve time, click again to gather it back. Press and hold to dissolve
+// only while held.
+class DissolveButton : public juce::Button
+{
+public:
+    explicit DissolveButton (RhytmsProcessor& p) : juce::Button ("dissolve"), proc (p)
+    {
+        setClickingTogglesState (false);
+        setTooltip ("dissolve: click to let the rhythm come apart into a held cloud over the dissolve time, "
+                    "click again to gather it. press and hold to dissolve only while held.");
+    }
+
+    void mouseDown (const juce::MouseEvent&) override
+    {
+        pressedOn = ! getToggleState();
+        pressTime = juce::Time::getMillisecondCounter();
+        setToggleState (pressedOn, juce::sendNotification);
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (pressedOn && juce::Time::getMillisecondCounter() - pressTime > 450)
+            setToggleState (false, juce::sendNotification);
+        pressedOn = false;
+    }
+
+    void paintButton (juce::Graphics& g, bool over, bool) override
+    {
+        const auto b = getLocalBounds().toFloat().reduced (1.0f);
+        const float d = proc.visual.dissolve.load();
+
+        g.setColour (colours::red.withAlpha (0.08f + 0.25f * d));
+        g.fillRect (b);
+        g.setColour (getToggleState() ? colours::red : (over ? colours::ink : colours::ink.withAlpha (0.5f)));
+        g.drawRect (b, getToggleState() ? 1.6f : 1.0f);
+
+        // the word comes apart into grains as it dissolves
+        juce::Random r (5);
+        for (int i = 0; i < 90; ++i)
+        {
+            const float x = b.getX() + r.nextFloat() * b.getWidth();
+            const float y = b.getY() + r.nextFloat() * b.getHeight();
+            const float drift = d * (r.nextFloat() - 0.3f) * 14.0f;
+            g.setColour (colours::red.withAlpha (d * (0.25f + 0.5f * r.nextFloat())));
+            g.fillEllipse (x + drift, y - drift * 0.4f, 1.6f, 1.6f);
+        }
+
+        g.setColour ((getToggleState() ? colours::red : colours::ink).withAlpha (1.0f - 0.6f * d));
+        g.setFont (serif (19.0f, true));
+        g.drawText ("dissolve", b, juce::Justification::centred);
+    }
+
+private:
+    RhytmsProcessor& proc;
+    bool pressedOn = false;
+    juce::uint32 pressTime = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Harmony: the twelve pitch classes as a little score. Ink dots are the
+// scale, red rings the chord sounding now, and each note flashes when a
+// strike lands on it.
+class HarmonyView : public juce::Component
+{
+public:
+    explicit HarmonyView (RhytmsProcessor& p) : proc (p) {}
+
+    void paint (juce::Graphics& g) override
+    {
+        const auto b = getLocalBounds().toFloat();
+        const bool on = proc.apvts.getRawParameterValue ("musical")->load() > 0.5f;
+        const int key = (int) proc.apvts.getRawParameterValue ("key")->load();
+        const int scale = (int) proc.apvts.getRawParameterValue ("scale")->load();
+        Harmony h;
+        h.configure (key, scale, (int) proc.apvts.getRawParameterValue ("chords")->load());
+        const int degree = proc.visual.chordDegree.load();
+        const auto chord = h.chordPitchClasses (degree);
+
+        g.setColour (colours::paperDk.withAlpha (0.5f));
+        g.fillRect (b);
+        g.setColour (colours::faint);
+        g.drawRect (b, 1.0f);
+
+        // title: key, scale, roman numeral of the chord
+        static const char* numerals[] = { "i", "ii", "iii", "iv", "v", "vi", "vii" };
+        const int third = (chord[1] - chord[0] + 12) % 12, fifth = (chord[2] - chord[0] + 12) % 12;
+        juce::String roman = numerals[((degree % 7) + 7) % 7];
+        if (third == 4) roman = roman.toUpperCase();
+        if (fifth == 6) roman << juce::String::fromUTF8 ("\xc2\xb0");
+        g.setColour (on ? colours::ink : colours::ink.withAlpha (0.4f));
+        g.setFont (serif (13.0f, true));
+        g.drawText (Harmony::keyNames()[key] + " " + Harmony::scaleNames()[scale] + (on ? "   " + roman : "   (off)"),
+                    b.reduced (8.0f, 4.0f).removeFromTop (16.0f), juce::Justification::left);
+
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        auto cells = b.reduced (8.0f, 6.0f).withTrimmedTop (18.0f);
+        const float w = cells.getWidth() / 12.0f;
+        for (int pc = 0; pc < 12; ++pc)
+        {
+            const int hits = proc.visual.pitchClassHits[(size_t) pc].load();
+            if (hits != lastHits[pc]) { lastHits[pc] = hits; flash[pc] = now; }
+            const float f = on ? (float) juce::jmax (0.0, 1.0 - (now - flash[pc]) / 350.0) : 0.0f;
+
+            bool inScale = false;
+            for (int d = 0; d < h.scaleSize(); ++d) inScale |= h.pitchClassOf (d) == pc;
+            const bool inChord = pc == chord[0] || pc == chord[1] || pc == chord[2];
+            const float cx = cells.getX() + w * (pc + 0.5f);
+            const float cy = cells.getY() + cells.getHeight() * 0.42f;
+            const float alpha = on ? 1.0f : 0.35f;
+
+            if (f > 0.0f)
+            {
+                g.setColour (colours::red.withAlpha (0.25f * f * alpha));
+                g.fillEllipse (cx - 11.0f, cy - 11.0f, 22.0f, 22.0f);
+            }
+            if (inScale)
+            {
+                const float rad = pc == key ? 4.5f : 3.2f;
+                g.setColour (colours::ink.withAlpha (alpha));
+                g.fillEllipse (cx - rad, cy - rad, rad * 2.0f, rad * 2.0f);
+            }
+            else
+            {
+                g.setColour (colours::faint);
+                g.fillEllipse (cx - 1.2f, cy - 1.2f, 2.4f, 2.4f);
+            }
+            if (inChord && on)
+            {
+                g.setColour (colours::red);
+                g.drawEllipse (cx - 7.5f, cy - 7.5f, 15.0f, 15.0f, 1.3f);
+            }
+
+            g.setColour (colours::ink.withAlpha (0.5f * alpha));
+            g.setFont (mono (9.0f));
+            g.drawText (Harmony::keyNames()[pc], juce::Rectangle<float> (cx - w * 0.5f, cells.getBottom() - 12.0f, w, 12.0f),
+                        juce::Justification::centred);
+        }
+    }
+
+private:
+    RhytmsProcessor& proc;
+    int lastHits[12] {};
+    double flash[12] {};
 };
 
 } // namespace rhytms::ui

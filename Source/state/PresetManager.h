@@ -28,7 +28,7 @@ public:
     juce::File getUserDirectory() const;
     juce::File getFactoryDirectory() const;
 
-    // Writes any factory preset that is not on disk yet.
+    // Writes any factory preset that is missing or from another version.
     void seedFactory (const std::vector<std::pair<juce::String, juce::ValueTree>>& presets);
 
     bool save (const juce::ValueTree& state, juce::File target) const;

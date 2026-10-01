@@ -29,8 +29,14 @@ void PresetManager::seedFactory (const std::vector<std::pair<juce::String, juce:
 {
     for (const auto& [name, tree] : presets)
     {
+        // rewrite factory presets written by an older version, so they pick
+        // up new parameters; user presets are never touched
         const auto file = getFactoryDirectory().getChildFile (sanitise (name) + ".xml");
-        if (! file.existsAsFile())
+        bool current = false;
+        if (file.existsAsFile())
+            if (auto xml = juce::XmlDocument::parse (file))
+                current = xml->getStringAttribute ("version") == tree.getProperty ("version").toString();
+        if (! current)
             save (tree, file);
     }
 }

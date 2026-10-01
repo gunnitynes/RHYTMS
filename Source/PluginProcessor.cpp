@@ -84,6 +84,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout RhytmsProcessor::createLayou
     layout.add (unit ("dry", "Dry", 0.5f));
     layout.add (unit ("wet", "Wet", 0.8f));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "out", 1 }, "Output", NormalisableRange<float> (-30.0f, 6.0f, 0.1f), 0.0f));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "dissolve", 1 }, "Dissolve", false));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "dissolveTime", 1 }, "Dissolve Time",
+                                                       NormalisableRange<float> (0.25f, 16.0f, 0.25f, 0.5f), 2.0f,
+                                                       AudioParameterFloatAttributes().withLabel ("bars")));
+
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { "musical", 1 }, "Musical", false));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "key", 1 }, "Key", Harmony::keyNames(), 2));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "scale", 1 }, "Scale", Harmony::scaleNames(), 3));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "chords", 1 }, "Chords", Harmony::progressionNames(), 0));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "chordLen", 1 }, "Chord Length", Harmony::chordLengthNames(), 2));
+    layout.add (unit ("harmony", "Harmony", 0.6f));
+    layout.add (unit ("snap", "Snap", 1.0f));
+    layout.add (unit ("ring", "Ring", 0.3f));
+
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { "morph", 1 }, "Morph", false));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { "morphTime", 1 }, "Morph Time",
                                                        NormalisableRange<float> (0.5f, 60.0f, 0.1f, 0.4f), 8.0f,
@@ -124,6 +138,10 @@ RhytmsProcessor::RhytmsProcessor()
     pMirror = get ("mirror"); pSwing = get ("swing");   pHalo = get ("halo");
     pDust = get ("dust");     pDry = get ("dry");       pWet = get ("wet");
     pOut = get ("out");
+    pMusical = get ("musical"); pKey = get ("key");         pScale = get ("scale");
+    pChords = get ("chords");   pChordLen = get ("chordLen"); pHarmony = get ("harmony");
+    pSnap = get ("snap");       pRing = get ("ring");
+    pDissolve = get ("dissolve"); pDissolveTime = get ("dissolveTime");
 
     for (int o = 0; o < numOrbits; ++o)
     {
@@ -177,6 +195,8 @@ void RhytmsProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     capture.prepare (sr);
     dust.prepare (sr);
     halo.prepare (sr);
+    for (auto& v : voices) v.prepare (sr);
+    dissolveAmount = dis = 0.0f;
     wetBuffer.setSize (2, juce::jmax (1, samplesPerBlock), false, true, false);
     for (auto& p : pending) p.used = false;
     for (auto& o : orbits) o.reset();
@@ -189,10 +209,10 @@ void RhytmsProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     outGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (param (pOut)));
 }
 
-void RhytmsProcessor::addEvent (int offset, int orbit, int step, float velocity)
+void RhytmsProcessor::addEvent (int offset, int orbit, int step, float velocity, double ppq)
 {
     if (numEvents < (int) events.size())
-        events[(size_t) numEvents++] = { offset, orbit, step, velocity };
+        events[(size_t) numEvents++] = { offset, orbit, step, velocity, ppq };
 }
 
 void RhytmsProcessor::scheduleOrbit (int o, double ppqStart, double ppqEnd, double beatsPerSample, double barBeats)
@@ -202,7 +222,7 @@ void RhytmsProcessor::scheduleOrbit (int o, double ppqStart, double ppqEnd, doub
 
     const int steps = (int) param (p.steps);
     const float density = param (pDensity);
-    const float order = param (pOrder);
+    const float order = param (pOrder) + (1.0f - param (pOrder)) * 0.7f * dis;
     const int pulses = (int) param (p.pulses);
     const int effPulses = juce::jlimit (0, steps, (int) std::round ((float) pulses * std::pow (2.0f, (density - 0.5f) * 3.2f)));
     orbit.setShape (steps, effPulses, (int) param (p.rotate) % steps);
@@ -249,6 +269,7 @@ void RhytmsProcessor::scheduleOrbit (int o, double ppqStart, double ppqEnd, doub
         }
 
         prob = prob * (1.0f - 0.45f * order) + (1.0f - prob) * 0.22f * order * (0.5f + density);
+        prob *= 1.0f - 0.8f * dis;   // dissolving: the rhythm thins out
 
         const int pin = pins[(size_t) o][(size_t) pos].load (std::memory_order_relaxed);
         if (pin == 1) prob = 1.0f;
@@ -261,10 +282,10 @@ void RhytmsProcessor::scheduleOrbit (int o, double ppqStart, double ppqEnd, doub
         if (! on && pin != 1) vel *= 0.6f;
         vel *= 1.0f - rng.nextFloat() * 0.45f * order;
 
-        addEvent (offset, o, pos, vel);
+        addEvent (offset, o, pos, vel, t);
 
         // rolls: a strike can stutter into the gap after it
-        const float rollChance = order * (0.15f + 0.45f * density) * 0.6f;
+        const float rollChance = order * (0.15f + 0.45f * density) * 0.6f * (1.0f - dis);
         if (rng.nextFloat() < rollChance)
         {
             const int count = 2 + rng.nextInt (3);
@@ -279,15 +300,48 @@ void RhytmsProcessor::scheduleOrbit (int o, double ppqStart, double ppqEnd, doub
     }
 }
 
-void RhytmsProcessor::strike (int o, int step, float velocity)
+float RhytmsProcessor::harmonise (const Slice& slice, float semis, double ppq, float& ringHz)
+{
+    // Unpitched strikes (drums, breath, noise) are heard as the key's root,
+    // so their transpositions land on the scale too.
+    const float detected = capture.pitchOf (slice);
+    const bool pitched = detected > 20.0f && detected < 110.0f;
+    const float reference = pitched ? detected : 60.0f + (float) harmony.getRoot();
+    const float desired = reference + semis;
+
+    const int degree = harmony.chordDegreeAt (ppq, currentBarBeats, Harmony::chordLengthBars ((int) param (pChordLen)));
+    visual.chordDegree.store (degree, std::memory_order_relaxed);
+
+    float target;
+    if (rng.nextFloat() < param (pHarmony))
+    {
+        // mostly root, third and fifth; now and then the seventh
+        const float r = rng.nextFloat();
+        const int tone = r < 0.38f ? 0 : r < 0.64f ? 1 : r < 0.9f ? 2 : 3;
+        target = harmony.chordToneNear (desired, degree, harmony.scaleSize() >= 5 ? tone : tone % 3);
+    }
+    else
+    {
+        target = harmony.snapToScale (desired);
+    }
+
+    target = desired + (target - desired) * param (pSnap);
+    ringHz = Harmony::midiToHz (target);
+    const int pc = ((int) std::lround (target) % 12 + 12) % 12;
+    visual.pitchClassHits[(size_t) pc].fetch_add (1, std::memory_order_relaxed);
+    return juce::jlimit (-36.0f, 36.0f, target - reference);
+}
+
+void RhytmsProcessor::strike (int o, int step, float velocity, double ppq)
 {
     auto& p = op[(size_t) o];
-    const float order = param (pOrder);
-    const float bloom = param (pBloom);
+    const float baseOrder = param (pOrder);
+    const float order = baseOrder + (1.0f - baseOrder) * 0.7f * dis;
+    const float bloom = param (pBloom) + (1.0f - param (pBloom)) * dis;
 
     const int avail = juce::jmax (1, juce::jmin (capture.numSlices(), (int) param (pMemory)));
     int idx = (int) std::round (param (p.reach) * (float) (avail - 1));
-    if (rng.nextFloat() < order * 0.7f)
+    if (rng.nextFloat() < order * 0.7f + dis * 0.3f)
         idx = rng.nextInt (avail);
 
     Slice slice;
@@ -303,22 +357,31 @@ void RhytmsProcessor::strike (int o, int step, float velocity)
         static constexpr int intervals[] = { 12, -12, 7, -5, 19, 24, -7, 5 };
         semis += (float) intervals[rng.nextInt (8)];
     }
-    semis += (rng.nextFloat() * 2.0f - 1.0f) * order * 0.12f;
+
+    if (param (pMusical) > 0.5f)
+    {
+        float ringHz = 0.0f;
+        semis = harmonise (slice, semis, ppq, ringHz);
+        v.ringHz = ringHz;
+        v.ring = param (pRing);
+    }
+
+    semis += (rng.nextFloat() * 2.0f - 1.0f) * (order * 0.12f + dis * 0.3f);
     v.rate = std::pow (2.0, semis / 12.0);
 
-    v.reverse = rng.nextFloat() < param (p.reverse);
+    v.reverse = rng.nextFloat() < param (p.reverse) + 0.3f * dis;
     v.gain = velocity * param (p.level);
     v.pan = juce::jlimit (-1.0f, 1.0f, param (p.pan) + (rng.nextFloat() * 2.0f - 1.0f) * order * 0.5f);
-    v.colour = juce::jlimit (-1.0f, 1.0f, param (p.colour) + (rng.nextFloat() * 2.0f - 1.0f) * order * 0.15f);
+    v.colour = juce::jlimit (-1.0f, 1.0f, param (p.colour) + (rng.nextFloat() * 2.0f - 1.0f) * order * 0.15f - 0.45f * dis);
     v.bloom = bloom;
-    v.texture = order;
+    v.texture = juce::jmin (1.0f, order + 0.4f * dis);
     v.orbit = o;
 
     const double samplesPerBeat = sr * 60.0 / currentBpm;
     const double stepSamples = rateBeats ((int) param (p.rate)) * samplesPerBeat;
     const double barSamples = currentBarBeats * samplesPerBeat;
     const float length = param (p.length);
-    v.gateSamples = stepSamples * (0.25 + length * 3.75);
+    v.gateSamples = stepSamples * (0.25 + length * 3.75) * (1.0 + 3.0 * dis);
     v.releaseSamples = 0.004 * sr + (double) (bloom * bloom) * barSamples * 1.2 + length * stepSamples * 0.5;
 
     int chosen = -1;
@@ -379,6 +442,16 @@ void RhytmsProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     currentBpm = bpm;
     currentBarBeats = barBeats;
 
+    // dissolve ramps over its time (in bars) in either direction
+    {
+        const double rampSamples = juce::jmax (1.0, param (pDissolveTime) * barBeats * sr * 60.0 / bpm);
+        const float step = (float) (n / rampSamples);
+        dissolveAmount = juce::jlimit (0.0f, 1.0f, dissolveAmount + (param (pDissolve) > 0.5f ? step : -step));
+        dis = dissolveAmount * dissolveAmount * (3.0f - 2.0f * dissolveAmount);
+        visual.dissolve.store (dis, std::memory_order_relaxed);
+    }
+    harmony.configure ((int) param (pKey), (int) param (pScale), (int) param (pChords));
+
     if (regrowRequested.exchange (false))
         for (auto& o : orbits) o.reset();
 
@@ -406,7 +479,7 @@ void RhytmsProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         if (pe.time < ppqStart - 1.0e-6 || pe.time > ppqEnd + 64.0) { pe.used = false; continue; }
         if (pe.time < ppqEnd)
         {
-            addEvent (juce::jlimit (0, n - 1, (int) ((pe.time - ppqStart) / beatsPerSample)), pe.orbit, pe.step, pe.velocity);
+            addEvent (juce::jlimit (0, n - 1, (int) ((pe.time - ppqStart) / beatsPerSample)), pe.orbit, pe.step, pe.velocity, pe.time);
             pe.used = false;
         }
     }
@@ -434,13 +507,14 @@ void RhytmsProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         const int at = juce::jlimit (0, n, events[(size_t) e].offset);
         renderVoices (cursor, at);
         cursor = juce::jmax (cursor, at);
-        strike (events[(size_t) e].orbit, events[(size_t) e].step, events[(size_t) e].velocity);
+        strike (events[(size_t) e].orbit, events[(size_t) e].step, events[(size_t) e].velocity, events[(size_t) e].ppq);
     }
     renderVoices (cursor, n);
 
     wetBuffer.applyGain (0, n, 0.7f);
     dust.process (wl, wr, n, param (pDust), rng);
-    halo.process (wl, wr, n, param (pHalo), sr * 60.0 / bpm);
+    const float haloAmount = param (pHalo);
+    halo.process (wl, wr, n, haloAmount + juce::jmax (0.0f, 0.85f - haloAmount) * dis, sr * 60.0 / bpm);
 
     // ---- mix ----
     dryGain.setTargetValue (param (pDry));
@@ -513,7 +587,7 @@ namespace
 {
 // Loading a preset or stepping through history never changes these: they
 // belong to the performance, not to the sound.
-const juce::StringArray performanceIds { "sync", "hold", "morph", "morphTime", "out" };
+const juce::StringArray performanceIds { "sync", "hold", "morph", "morphTime", "out", "dissolve", "dissolveTime" };
 
 struct Setting { const char* id; float value; };
 struct FactoryPreset { const char* name; std::vector<Setting> settings; };
@@ -565,6 +639,36 @@ const std::vector<FactoryPreset>& factoryPresets()
           { { "swing", 0.55f }, { "dust", 0.5f }, { "halo", 0.45f }, { "bloom", 0.35f },
             { "o1_steps", 12.0f }, { "o1_pulses", 4.0f }, { "o1_rate", 1.0f },
             { "o2_steps", 9.0f }, { "o2_pulses", 3.0f }, { "o2_rate", 1.0f }, { "o2_pitch", -12.0f } } },
+
+        // ---- musical: key, scale, chords and the ring resonator ----
+        { "Kalimba Rain",
+          { { "musical", 1.0f }, { "key", 2.0f }, { "scale", 8.0f }, { "ring", 0.55f }, { "harmony", 0.7f },
+            { "bloom", 0.2f }, { "density", 0.65f }, { "order", 0.2f }, { "o1_pitch", 12.0f }, { "o2_pitch", 0.0f },
+            { "o3_pitch", 7.0f }, { "o1_colour", 0.3f }, { "halo", 0.35f } } },
+
+        { "Drum Choir",
+          { { "musical", 1.0f }, { "key", 9.0f }, { "scale", 2.0f }, { "chords", 2.0f }, { "chordLen", 2.0f },
+            { "harmony", 0.9f }, { "ring", 0.35f }, { "bloom", 0.85f }, { "halo", 0.5f }, { "density", 0.4f },
+            { "o2_pitch", -12.0f }, { "o1_length", 0.8f }, { "o2_length", 0.9f }, { "o1_colour", -0.3f } } },
+
+        { "Modal Bells",
+          { { "musical", 1.0f }, { "key", 2.0f }, { "scale", 3.0f }, { "chords", 5.0f }, { "chordLen", 1.0f },
+            { "ring", 0.7f }, { "harmony", 0.75f }, { "bloom", 0.5f }, { "halo", 0.5f }, { "density", 0.4f },
+            { "o1_rate", 1.0f }, { "o2_rate", 3.0f }, { "o3_rate", 0.0f }, { "o1_pitch", 12.0f }, { "o3_pitch", 24.0f } } },
+
+        { "Pelog Garden",
+          { { "musical", 1.0f }, { "key", 4.0f }, { "scale", 12.0f }, { "ring", 0.6f }, { "harmony", 0.5f },
+            { "density", 0.6f }, { "order", 0.2f }, { "o3_pitch", 12.0f }, { "dust", 0.2f }, { "bloom", 0.25f } } },
+
+        { "Glass Progression",
+          { { "musical", 1.0f }, { "key", 0.0f }, { "scale", 1.0f }, { "chords", 1.0f }, { "chordLen", 1.0f },
+            { "harmony", 1.0f }, { "ring", 0.45f }, { "bloom", 0.35f }, { "o1_colour", 0.4f }, { "o2_colour", 0.2f },
+            { "o2_pitch", 0.0f } } },
+
+        { "Dissolving Hymn",
+          { { "musical", 1.0f }, { "key", 5.0f }, { "scale", 5.0f }, { "chords", 4.0f }, { "chordLen", 3.0f },
+            { "harmony", 0.8f }, { "ring", 0.25f }, { "bloom", 0.7f }, { "halo", 0.6f }, { "density", 0.3f },
+            { "o1_length", 0.7f }, { "o2_length", 0.8f } } },
     };
     return presets;
 }

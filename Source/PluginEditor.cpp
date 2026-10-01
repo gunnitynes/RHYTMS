@@ -20,7 +20,7 @@ constexpr int firstPresetId = 100;
 // ===========================================================================
 
 RhytmsPanel::RhytmsPanel (RhytmsProcessor& p)
-    : proc (p), rings (p), weather (p), memoryView (p)
+    : proc (p), rings (p), weather (p), memoryView (p), dissolveButton (p), harmonyView (p)
 {
     addAndMakeVisible (rings);
     addAndMakeVisible (weather);
@@ -132,6 +132,36 @@ RhytmsPanel::RhytmsPanel (RhytmsProcessor& p)
     addAndMakeVisible (regrowButton);
     addAndMakeVisible (throwButton);
     addAndMakeVisible (clearButton);
+
+    // ---- dissolve ----
+    addAndMakeVisible (dissolveButton);
+    buttonAttachments.push_back (std::make_unique<ButtonAttachment> (proc.apvts, "dissolve", dissolveButton));
+    addKnob (dissolveTimeKnob, "dissolveTime", "over", colours::red);
+
+    // ---- v. harmony ----
+    musicalButton.setColour (juce::ToggleButton::tickColourId, colours::red);
+    musicalButton.setTooltip ("Musical: retune every strike to the key and scale and voice it as a tone of the current chord");
+    addAndMakeVisible (musicalButton);
+    buttonAttachments.push_back (std::make_unique<ButtonAttachment> (proc.apvts, "musical", musicalButton));
+    addAndMakeVisible (harmonyView);
+
+    struct HarmonySpec { const char* id; const char* label; bool showValue; const char* tip; };
+    static constexpr HarmonySpec harmonySpecs[] = {
+        { "key", "key", true, "The key's root note" },
+        { "scale", "scale", true, "The scale strikes are pulled onto" },
+        { "chords", "chords", true, "A chord progression, locked to the bar" },
+        { "chordLen", "every", true, "How long each chord lasts" },
+        { "harmony", "harmony", false, "How often a strike becomes a chord tone rather than just a scale note" },
+        { "snap", "snap", false, "How firmly strikes are pulled onto the notes (less = microtonal drift)" },
+        { "ring", "ring", false, "A resonator tuned to each note, so even drums and noise sing in key" },
+    };
+    for (const auto& spec : harmonySpecs)
+    {
+        harmonyKnobs.emplace_back();
+        addKnob (harmonyKnobs.back(), spec.id, spec.label, colours::red);
+        harmonyKnobs.back()->setShowValue (spec.showValue);
+        harmonyKnobs.back()->slider.setTooltip (spec.tip);
+    }
 
     populatePresets();
     refreshLocks();
@@ -281,6 +311,11 @@ void RhytmsPanel::timerCallback()
 {
     const bool synced = proc.apvts.getRawParameterValue ("sync")->load() > 0.5f;
     bpmKnob->setAlpha (synced ? 0.35f : 1.0f);
+    const bool musical = proc.apvts.getRawParameterValue ("musical")->load() > 0.5f;
+    for (auto& k : harmonyKnobs)
+        k->setAlpha (musical ? 1.0f : 0.45f);
+    harmonyView.repaint();
+    dissolveButton.repaint();
     undoButton.setEnabled (proc.canUndo());
     redoButton.setEnabled (proc.canRedo());
     undoButton.setAlpha (proc.canUndo() ? 1.0f : 0.35f);
@@ -321,6 +356,7 @@ void RhytmsPanel::paint (juce::Graphics& g)
     g.setColour (colours::faint);
     g.drawHorizontalLine (58, 24.0f, (float) getWidth() - 24.0f);
     g.drawHorizontalLine (522, 24.0f, (float) getWidth() - 24.0f);
+    g.drawHorizontalLine (748, 24.0f, (float) getWidth() - 24.0f);
     g.drawVerticalLine (348, 70.0f, 510.0f);
     g.drawVerticalLine (770, 70.0f, 510.0f);
     g.drawVerticalLine (530, 16.0f, 44.0f);
@@ -336,13 +372,7 @@ void RhytmsPanel::paint (juce::Graphics& g)
     caption ("ii.  orbits", 362, 64);
     caption ("iii.  bloom & space", 790, 64);
     caption ("iv.  voices of the orbits", 24, 528);
-
-    g.setColour (colours::ink.withAlpha (0.45f));
-    g.setFont (serif (11.5f, true));
-    g.drawFittedText ("click a step to pin it: always, then never, then free.\n"
-                      "scroll on a circle to turn it.\n"
-                      "alt-click a knob to lock it, ctrl/cmd-drag to set its randomize range.",
-                      790, 440, 290, 50, juce::Justification::topLeft, 3);
+    caption ("v.  harmony", 24, 754);
 }
 
 void RhytmsPanel::resized()
@@ -382,7 +412,16 @@ void RhytmsPanel::resized()
     };
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
-            grid[r][c]->setBounds (790 + c * 98, 84 + r * 116, 92, 92);
+            grid[r][c]->setBounds (790 + c * 98, 80 + r * 110, 92, 90);
+
+    dissolveButton.setBounds (792, 428, 196, 66);
+    dissolveTimeKnob->setBounds (998, 426, 72, 70);
+
+    // v. harmony
+    musicalButton.setBounds (24, 794, 90, 24);
+    for (size_t k = 0; k < harmonyKnobs.size(); ++k)
+        harmonyKnobs[k]->setBounds (100 + (int) k * 88, 768, 80, 78);
+    harmonyView.setBounds (726, 770, 350, 74);
 
     // iv. voices
     for (int o = 0; o < numOrbits; ++o)
@@ -404,7 +443,10 @@ RhytmsEditor::RhytmsEditor (RhytmsProcessor& p)
     addAndMakeVisible (panel);
 
     // read before the limits below trigger a resize that would overwrite it
-    const float scale = juce::jlimit (0.6f, 1.6f, proc.getUiScale());
+    float scale = juce::jlimit (0.6f, 1.6f, proc.getUiScale());
+    // never open taller than the screen
+    if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+        scale = juce::jmax (0.6f, juce::jmin (scale, (float) (display->userArea.getHeight() - 90) / (float) RhytmsPanel::panelHeight));
     const double aspect = (double) RhytmsPanel::panelWidth / RhytmsPanel::panelHeight;
     setResizable (true, true);
     setResizeLimits (660, (int) (660 / aspect), 1760, (int) (1760 / aspect));

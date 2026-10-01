@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(RHYTMS VERSION 0.1.0 LANGUAGES C CXX)
+project(RHYTMS VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +29,15 @@ else()
     FetchContent_MakeAvailable(juce)
 endif()
 
+# -DRHYTMS_INSTALL=ON copies the built plugins into this machine's plugin
+# folders after every build (~/Library/Audio/Plug-Ins, C:\Program Files\Common Files, ~/.vst3).
+option(RHYTMS_INSTALL "Copy plugins into the system plugin folders after building" OFF)
+if (RHYTMS_INSTALL)
+    set(RHYTMS_COPY TRUE)
+else()
+    set(RHYTMS_COPY FALSE)
+endif()
+
 set(RHYTMS_FORMATS VST3 Standalone)
 if (APPLE)
     list(APPEND RHYTMS_FORMATS AU)
@@ -42,7 +51,7 @@ juce_add_plugin(RHYTMS
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    COPY_PLUGIN_AFTER_BUILD FALSE
+    COPY_PLUGIN_AFTER_BUILD ${RHYTMS_COPY}
     PLUGIN_MANUFACTURER_CODE Gnty
     PLUGIN_CODE Rhtm
     FORMATS ${RHYTMS_FORMATS}

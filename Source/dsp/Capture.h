@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "Harmony.h"
+
 namespace rhytms
 {
 
@@ -16,6 +18,8 @@ struct Slice
     int64_t start = 0;
     int length = 0;
     float energy = 0.0f;
+    float pitch = -1.0f;  // MIDI note, -1 = no clear pitch
+    bool analysed = false;
 };
 
 // Continuous memory of the input with an onset detector that cuts it into
@@ -38,6 +42,7 @@ public:
         writeCount = 0;
         sliceCount = 0;
         newest = -1;
+        lastPitch = -1.0f;
         envFast = envSlow = 0.0f;
         sinceOnset = 1 << 30;
         lastBarPhase = 0.0;
@@ -158,6 +163,65 @@ public:
         return writeCount - out.start < (int64_t) (length - sampleRate * 9.0);
     }
 
+    // Fundamental of a strike as a MIDI note, or -1 when it has no clear
+    // pitch. Measured once, just after the attack, then remembered.
+    float analysePitch (int fromNewest) noexcept
+    {
+        if (sliceCount == 0)
+            return -1.0f;
+        fromNewest = juce::jlimit (0, sliceCount - 1, fromNewest);
+        auto& s = slices[(size_t) (((newest - fromNewest) % maxSlices + maxSlices) % maxSlices)];
+        if (s.analysed)
+            return s.pitch;
+
+        constexpr int window = 768, maxTau = 600, decimate = 2;
+        const int skip = (int) (sampleRate * 0.012);
+        const int need = skip + (window + maxTau + 2) * decimate;
+        const auto available = fromNewest == 0 ? writeCount - s.start : (int64_t) s.length;
+        if (available < need)
+        {
+            if (fromNewest != 0 || held)
+                s.analysed = true;   // too short to ever tell
+            return -1.0f;
+        }
+
+        std::array<float, window + maxTau + 4> x {};
+        float peak = 0.0f;
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double pos = (double) (s.start + skip) + (double) i * decimate;
+            x[i] = 0.25f * (read (0, pos) + read (1, pos) + read (0, pos + 1.0) + read (1, pos + 1.0));
+            peak = juce::jmax (peak, std::abs (x[i]));
+        }
+        s.analysed = true;
+        if (peak < 1.0e-4f)
+            return s.pitch = -1.0f;
+
+        const double rate = sampleRate / decimate;
+        const int minTau = juce::jmax (2, (int) (rate / 1500.0));
+        const int maxT = juce::jmin (maxTau, (int) (rate / 45.0));
+        const float period = estimatePeriod (x.data(), window, maxT, minTau);
+        s.pitch = period > 0.0f ? Harmony::hzToMidi ((float) (rate / period)) : -1.0f;
+        return s.pitch;
+    }
+
+    // A strike played the instant it is caught is too fresh to measure, so
+    // it borrows the last pitch heard (a melody's notes rarely jump far).
+    float pitchOf (const Slice& slice) noexcept
+    {
+        for (int i = 0; i < sliceCount; ++i)
+        {
+            const auto& s = slices[(size_t) (((newest - i) % maxSlices + maxSlices) % maxSlices)];
+            if (s.start != slice.start)
+                continue;
+            const float p = analysePitch (i);
+            if (p > 0.0f)
+                lastPitch = p;
+            return s.analysed ? p : lastPitch;
+        }
+        return lastPitch;
+    }
+
     // Normalised mirror value for a 0..1 bar position, plus overall confidence.
     float mirrorAt (double barPhase) const noexcept
     {
@@ -218,6 +282,7 @@ private:
 
     std::array<Slice, maxSlices> slices {};
     int sliceCount = 0, newest = -1;
+    float lastPitch = -1.0f;
 
     float envFast = 0.0f, envSlow = 0.0f;
     float fastAttack = 0.1f, fastRelease = 0.01f, slowCoef = 0.001f;

@@ -4,12 +4,12 @@
 #include "ui/Look.h"
 #include "ui/Views.h"
 
-// Everything drawn at a fixed 1100 x 744; the editor scales it.
+// Everything drawn at a fixed 1100 x 852; the editor scales it.
 class RhytmsPanel : public juce::Component, private juce::Timer
 {
 public:
     static constexpr int panelWidth = 1100;
-    static constexpr int panelHeight = 744;
+    static constexpr int panelHeight = 852;
 
     explicit RhytmsPanel (RhytmsProcessor&);
     ~RhytmsPanel() override;
@@ -67,6 +67,15 @@ private:
     std::array<OrbitRow, rhytms::numOrbits> rows;
 
     juce::TextButton regrowButton { "regrow" }, throwButton { "throw" }, clearButton { "unpin" };
+
+    // dissolve
+    rhytms::ui::DissolveButton dissolveButton;
+    std::unique_ptr<rhytms::ui::Knob> dissolveTimeKnob;
+
+    // v. harmony
+    juce::ToggleButton musicalButton { "musical" };
+    rhytms::ui::HarmonyView harmonyView;
+    std::vector<std::unique_ptr<rhytms::ui::Knob>> harmonyKnobs;
 
     std::vector<std::pair<juce::String, rhytms::ui::Knob*>> lockableKnobs;
     std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;

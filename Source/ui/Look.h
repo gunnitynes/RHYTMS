@@ -244,6 +244,8 @@ public:
     }
 
     void setLock (const KnobLock& l) { lock = l; repaint(); }
+    // Choice knobs (key, scale...) show their value under the name at all times.
+    void setShowValue (bool b) { showValue = b; resized(); repaint(); }
     void setLockable (bool b) { slider.lockable = b; }
 
     std::function<void (const KnobLock&)> onLockEdited;
@@ -251,7 +253,7 @@ public:
     void resized() override
     {
         auto r = getLocalBounds();
-        r.removeFromBottom (15);
+        r.removeFromBottom (showValue ? 27 : 15);
         const int d = juce::jmin (r.getWidth(), r.getHeight());
         slider.setBounds (r.withSizeKeepingCentre (d, d));
     }
@@ -259,6 +261,17 @@ public:
     void paint (juce::Graphics& g) override
     {
         const bool active = slider.isMouseOverOrDragging();
+        if (showValue)
+        {
+            auto area = getLocalBounds().removeFromBottom (27);
+            g.setColour (colours::ink.withAlpha (0.8f));
+            g.setFont (serif (12.5f, true));
+            g.drawFittedText (label, area.removeFromTop (14), juce::Justification::centred, 1);
+            g.setColour (active ? colours::red : colours::red.withAlpha (0.85f));
+            g.setFont (mono (10.5f));
+            g.drawFittedText (slider.getTextFromValue (slider.getValue()), area, juce::Justification::centred, 1);
+            return;
+        }
         g.setColour (active ? colours::red : colours::ink.withAlpha (0.8f));
         g.setFont (active ? mono (10.5f) : serif (12.5f, true));
         const auto text = active ? slider.getTextFromValue (slider.getValue()) : label;
@@ -324,6 +337,7 @@ private:
 
     juce::String label;
     KnobLock lock;
+    bool showValue = false;
 };
 
 } // namespace rhytms::ui

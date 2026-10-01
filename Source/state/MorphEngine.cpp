@@ -8,10 +8,10 @@ namespace
 constexpr int morphRateHz = 30;
 
 // Mix, output and the performance controls stay where the player put them.
-const juce::StringArray neverRandomized { "bpm", "out", "morphTime" };
+const juce::StringArray neverRandomized { "bpm", "out", "morphTime", "dissolveTime" };
 
-// Knobs locked on first run: the mix and the input sensitivity.
-const juce::StringArray lockedByDefault { "dry", "wet", "sense" };
+// Knobs locked on first run: the mix, the input sensitivity and the key.
+const juce::StringArray lockedByDefault { "dry", "wet", "sense", "key", "scale" };
 
 // Sound-type profiles, as normalised ranges. Orbit parameters are matched by
 // their suffix ("length" covers o1_length, o2_length and o3_length).
@@ -42,6 +42,10 @@ const std::vector<Category>& categories()
         { "Sparse",
           { { "density", 0.0f, 0.35f }, { "order", 0.0f, 0.4f }, { "bloom", 0.3f, 0.8f },
             { "halo", 0.3f, 0.8f }, { "length", 0.3f, 0.8f }, { "evolve", 0.0f, 0.3f } } },
+
+        { "Harmonic",
+          { { "harmony", 0.5f, 1.0f }, { "snap", 0.85f, 1.0f }, { "ring", 0.2f, 0.7f }, { "bloom", 0.15f, 0.7f },
+            { "order", 0.0f, 0.4f }, { "evolve", 0.0f, 0.35f }, { "dust", 0.0f, 0.3f }, { "pitch", 0.375f, 0.75f } } },
 
         { "Mirror",
           { { "mirror", 0.6f, 1.0f }, { "order", 0.0f, 0.3f }, { "evolve", 0.0f, 0.2f },

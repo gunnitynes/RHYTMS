@@ -2,6 +2,7 @@
 
 #include "Capture.h"
 #include <juce_core/juce_core.h>
+#include <vector>
 
 namespace rhytms
 {
@@ -19,6 +20,8 @@ struct VoiceStart
     double gateSamples = 4000.0;
     double releaseSamples = 200.0;
     int orbit = 0;
+    float ringHz = 0.0f;    // tuned resonator pitch, 0 = off
+    float ring = 0.0f;      // 0..1 how much the resonator sings
 };
 
 // A single struck memory. It plays its slice, and depending on bloom it
@@ -27,6 +30,13 @@ struct VoiceStart
 class Voice
 {
 public:
+    void prepare (double sampleRate)
+    {
+        const auto len = (size_t) (sampleRate / 28.0) + 8;
+        for (auto& c : comb) c.assign (len, 0.0f);
+        active = false;
+    }
+
     bool isActive() const noexcept { return active; }
     int getOrbit() const noexcept { return params.orbit; }
     float getLevel() const noexcept { return amp; }
@@ -40,6 +50,7 @@ public:
         rng.setSeed ((juce::int64) seed);
         active = true;
         frozen = false;
+        sourceDone = false;
         elapsed = 0;
         amp = 0.0f;
         dir = p.reverse ? -1.0 : 1.0;
@@ -63,6 +74,25 @@ public:
 
         setupFilter (p.colour);
         s1[0] = s1[1] = s2[0] = s2[1] = 0.0f;
+
+        ringOn = p.ring > 0.001f && p.ringHz > 20.0f && ! comb[0].empty();
+        if (ringOn)
+        {
+            const double maxPeriod = (double) comb[0].size() - 4.0;
+            double period = sr / p.ringHz;
+            while (period > maxPeriod) period *= 0.5;   // fold up an octave
+            ringPeriod = period;
+            ringFb = 0.9f + 0.094f * std::sqrt (p.ring);
+            ringMix = p.ring;
+            ringNorm = (1.0f - ringFb) * 42.0f * (1.0f + 1.6f * std::pow (p.ring, 6.0f));
+            ringLevel = 0.0f;
+            for (int c = 0; c < 2; ++c)
+            {
+                std::fill (comb[c].begin(), comb[c].end(), 0.0f);
+                ringLp[c] = 0.0f;
+            }
+            combPos = 0;
+        }
     }
 
     void render (const Capture& cap, float* outL, float* outR, int numSamples) noexcept
@@ -71,7 +101,11 @@ public:
         {
             float l = 0.0f, r = 0.0f;
 
-            if (! frozen)
+            if (sourceDone)
+            {
+                // the slice is over; only the resonator still sings
+            }
+            else if (! frozen)
             {
                 l = cap.read (0, head);
                 r = cap.read (1, head);
@@ -111,15 +145,32 @@ public:
             {
                 amp *= (float) fadeOut / (float) (sr * 0.006 + 1.0);
                 if (--fadeOut <= 0)
-                    active = false;
+                {
+                    fadeOut = -1;
+                    sourceDone = true;
+                    active = ringOn;
+                }
             }
-
-            if ((double) elapsed > params.gateSamples && amp < 1.0e-4f)
-                active = false;
+            if (sourceDone)
+                amp = 0.0f;
 
             const float g = amp * params.gain;
-            outL[i] += filter (0, l) * g * panL;
-            outR[i] += filter (1, r) * g * panR;
+            float yl = filter (0, l) * g;
+            float yr = filter (1, r) * g;
+
+            if (ringOn)
+            {
+                yl = resonate (0, yl);
+                yr = resonate (1, yr);
+                if (++combPos >= (int) comb[0].size()) combPos = 0;
+                ringLevel = juce::jmax (std::abs (yl), std::abs (yr), ringLevel * 0.9995f);
+            }
+
+            if ((sourceDone || (double) elapsed > params.gateSamples) && amp < 1.0e-4f && (! ringOn || ringLevel < 1.0e-4f))
+                active = false;
+
+            outL[i] += yl * panL;
+            outR[i] += yr * panR;
             ++elapsed;
         }
     }
@@ -186,10 +237,26 @@ private:
         return mode == 0 ? v2 : x - fk * v1 - v2;
     }
 
+    // Karplus-style tuned comb: the strike excites it, it rings at the note.
+    float resonate (int ch, float x) noexcept
+    {
+        auto& buf = comb[(size_t) ch];
+        const int n = (int) buf.size();
+        double rp = (double) combPos - ringPeriod;
+        while (rp < 0.0) rp += n;
+        const int i0 = (int) rp;
+        const float t = (float) (rp - i0);
+        const float delayed = buf[(size_t) i0] + t * (buf[(size_t) ((i0 + 1) % n)] - buf[(size_t) i0]);
+        ringLp[ch] += 0.55f * (delayed - ringLp[ch]);
+        const float v = x + ringFb * ringLp[ch];
+        buf[(size_t) combPos] = v;
+        return x * (1.0f - ringMix) + std::tanh (v * ringNorm) * ringMix;
+    }
+
     VoiceStart params;
     double sr = 44100.0;
     juce::Random rng;
-    bool active = false, frozen = false;
+    bool active = false, frozen = false, sourceDone = false;
     int64_t elapsed = 0;
     float amp = 0.0f, releaseCoef = 0.999f;
     int attackSamples = 64, fadeOut = -1;
@@ -201,6 +268,12 @@ private:
     int mode = 0;
     float fg = 0.5f, fk = 1.0f, fa1 = 0.0f, fa2 = 0.0f, fa3 = 0.0f;
     float s1[2] {}, s2[2] {};
+
+    std::vector<float> comb[2];
+    bool ringOn = false;
+    double ringPeriod = 100.0;
+    float ringFb = 0.95f, ringMix = 0.0f, ringNorm = 0.1f, ringLevel = 0.0f, ringLp[2] {};
+    int combPos = 0;
 };
 
 } // namespace rhytms

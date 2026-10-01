@@ -72,6 +72,51 @@ to the right gives a dense, rolling storm made of your own sound.
 * **regrow** forgets what the orbits have grown into. **throw** rolls new shapes for
   all three. **unpin** clears every pin.
 
+## Dissolve
+
+A performance button for letting go. Click **dissolve** and, over **over**
+(¼ to 16 bars), the rhythm comes apart:
+
+* strikes thin out and stop rolling, and their timing loosens
+* every memory blooms into a held, frozen tone that drifts slightly out of tune
+* the sound darkens, more strikes play backwards, older memories surface
+* the halo swells
+
+What's left is a slow cloud made of your rhythm. Click again and it gathers back
+into the pattern over the same time. Press and hold the button to dissolve only for
+as long as you hold it. Dissolve is a parameter, so you can automate it in the DAW.
+
+## Harmony: the musical mode
+
+Turn on **musical** (section v) when you want rhythmic textures that are also
+harmonic: a drum loop that plays chords, or plucks that stay in key.
+
+* **Pitch tracking.** Each caught strike is measured once, just after its attack.
+  Pitched sounds (voice, plucks, bass, kalimba) are retuned from the note they
+  really are. Unpitched sounds (snare, claps, breath) are heard as the key's root,
+  so their transpositions land in key too.
+* **key** and **scale:** 14 scales, from major, minor, dorian, phrygian, lydian,
+  mixolydian and harmonic minor to pentatonics, whole tone, hirajoshi, pelog and
+  in sen.
+* **chords** and **every:** a progression locked to the bar (*still, I V vi IV,
+  i VI III VII, ii V I, pendulum, fifths, wander*), with each chord lasting ½ to 8
+  bars. Chords are built from the chosen scale, so a pelog progression stays pelog.
+* **harmony:** how often a strike becomes a tone of the current chord (root, third,
+  fifth, sometimes the seventh) rather than just a note of the scale. At 1, every
+  strike is a chord tone.
+* **snap:** how firmly notes are pulled into place. Below 1, they hang between
+  notes, microtonally.
+* **ring:** a resonator inside every voice, tuned to the note it plays, so even a
+  burst of noise sings at a pitch. Low settings add a tuned shimmer, high settings
+  turn every hit into a struck string or bar.
+* The orbit **pitch** knobs and weather's octave and fifth leaps still apply. Their
+  results are then pulled into the key.
+
+The strip on the right shows the key and the current chord as a roman numeral. Ink
+dots mark the scale, red rings mark the chord, and each note flashes when a strike
+lands on it. Key and scale start locked, so randomize and morph never change your
+key. Unlock them (alt-click) if you want them to.
+
 ## Presets, randomize, morph, undo
 
 The header carries the same toolkit as the other plugins:
@@ -79,22 +124,25 @@ The header carries the same toolkit as the other plugins:
 * **Presets:** a dropdown with *save as...* first, then **factory** and **user**
   sections, plus ‹ › to step through them. A preset is the whole state: every knob,
   the pinned steps and the knob locks. Loading a preset never changes sync, hold,
-  morph or the output level. Ten factory presets come with the plugin:
+  morph, dissolve or the output level. Sixteen factory presets come with the plugin:
   *Init, Tapped Gamelan, Ghost Choir, Stutter Poem, Polymeter Clock, Rain on Tin,
-  Slow Bells, Broken Machine, Mirror Mirror, Dust Waltz*.
+  Slow Bells, Broken Machine, Mirror Mirror, Dust Waltz*, and six musical ones:
+  *Kalimba Rain, Drum Choir, Modal Bells, Pelog Garden, Glass Progression,
+  Dissolving Hymn*.
   Files live in `~/Library/Application Support/gunnitynes/RHYTMS/Presets` on macOS
   and `%APPDATA%\gunnitynes\RHYTMS\Presets` on Windows.
 * **randomize** rolls every unlocked knob. The **▾** next to it steers the roll
-  towards a kind of rhythm: *pulse, bloom, storm, sparse, mirror* (or *any*).
+  towards a kind of rhythm: *pulse, bloom, storm, sparse, harmonic, mirror* (or *any*).
 * **Knob locks:** alt-click a knob to lock it (ochre dot). Ctrl/cmd-drag a knob to
   limit where randomize may put it (red arc). Ctrl/cmd-click clears the range, and
-  right-click opens a menu. Dry, wet and sense start locked, and orbit pitch starts
-  limited to an octave either way.
+  right-click opens a menu. Dry, wet, sense, key and scale start locked, and orbit
+  pitch starts limited to an octave either way.
 * **morph** lets every unlocked knob drift continuously between random states over
   **time** (0.5–60 s). Locked knobs stay put, so you can lock the parts you love and
   let the rest wander.
 * **undo / redo** step through randomize, throw, morph and preset changes.
-* The window is **resizable** (drag the corner) and remembers its size.
+* The window is **resizable** (drag the corner), remembers its size, and never
+  opens taller than your screen.
 
 ## Sync
 
@@ -163,7 +211,16 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-The plugin ends up in `build/RHYTMS_artefacts/Release/VST3/RHYTMS.vst3`. Copy it to:
+To build and install in one go, add `-DRHYTMS_INSTALL=ON` to the first command. Each
+build then copies the plugins into this machine's plugin folders. On a Mac, quit Live
+first, then rescan.
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DRHYTMS_INSTALL=ON
+cmake --build build --config Release
+```
+
+Without it, the plugin ends up in `build/RHYTMS_artefacts/Release/VST3/RHYTMS.vst3`. Copy it to:
 
 * `~/Library/Audio/Plug-Ins/VST3` on macOS (the AU goes in `~/Library/Audio/Plug-Ins/Components`)
 * `C:\Program Files\Common Files\VST3` on Windows
@@ -185,8 +242,9 @@ Source/
   PluginEditor.*      layout
   dsp/Capture.h       memory, onset detection, slices, mirror fingerprint
   dsp/Orbit.h         euclidean skeleton + cellular-automaton growth
-  dsp/Voice.h         slice playback, freeze grains (bloom), filter
+  dsp/Voice.h         slice playback, freeze grains (bloom), filter, ring resonator
   dsp/Halo.h          dust (wow + saturation) and halo (diffuse echo)
+  dsp/Harmony.h       keys, scales, progressions, YIN pitch tracking
   state/PresetManager factory / user preset files
   state/MorphEngine   randomize, morph, knob locks and ranges, categories
   ui/Look.h           paper & ink look, dials

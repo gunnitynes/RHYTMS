@@ -6,6 +6,7 @@
 
 #include "dsp/Capture.h"
 #include "dsp/Halo.h"
+#include "dsp/Harmony.h"
 #include "dsp/Orbit.h"
 #include "dsp/Voice.h"
 #include "state/MorphEngine.h"
@@ -42,6 +43,9 @@ struct VisualState
     std::atomic<double> bpm { 120.0 };
     std::atomic<bool> hostSynced { false };
     std::atomic<float> inputLevel { 0.0f };
+    std::atomic<float> dissolve { 0.0f };
+    std::atomic<int> chordDegree { 0 };
+    std::array<std::atomic<int>, 12> pitchClassHits {};
 };
 } // namespace rhytms
 
@@ -147,6 +151,7 @@ private:
         int orbit = 0;
         int step = 0;
         float velocity = 1.0f;
+        double ppq = 0.0;
     };
 
     void parameterChanged (const juce::String& id, float value) override;
@@ -154,8 +159,9 @@ private:
     void setCurrentPresetName (const juce::String& name);
 
     void scheduleOrbit (int o, double ppqStart, double ppqEnd, double beatsPerSample, double barBeats);
-    void strike (int orbit, int step, float velocity);
-    void addEvent (int offset, int orbit, int step, float velocity);
+    void strike (int orbit, int step, float velocity, double ppq);
+    void addEvent (int offset, int orbit, int step, float velocity, double ppq);
+    float harmonise (const rhytms::Slice& slice, float semis, double ppq, float& ringHz);
     void publishVisuals (double ppqEnd);
     float param (std::atomic<float>* p) const { return p->load (std::memory_order_relaxed); }
 
@@ -175,6 +181,16 @@ private:
     std::atomic<float>* pDry {};
     std::atomic<float>* pWet {};
     std::atomic<float>* pOut {};
+    std::atomic<float>* pMusical {};
+    std::atomic<float>* pKey {};
+    std::atomic<float>* pScale {};
+    std::atomic<float>* pChords {};
+    std::atomic<float>* pChordLen {};
+    std::atomic<float>* pHarmony {};
+    std::atomic<float>* pSnap {};
+    std::atomic<float>* pRing {};
+    std::atomic<float>* pDissolve {};
+    std::atomic<float>* pDissolveTime {};
     std::array<OrbitParams, rhytms::numOrbits> op;
 
     std::array<std::array<std::atomic<int>, rhytms::Orbit::maxSteps>, rhytms::numOrbits> pins {};
@@ -185,6 +201,9 @@ private:
     std::array<rhytms::Voice, rhytms::numVoices> voices;
     rhytms::Dust dust;
     rhytms::Halo halo;
+    rhytms::Harmony harmony;
+    float dissolveAmount = 0.0f;   // 0..1 ramp, follows the dissolve button over dissolve time
+    float dis = 0.0f;              // shaped amount used this block
     juce::Random rng;
 
     std::array<Pending, 64> pending {};
